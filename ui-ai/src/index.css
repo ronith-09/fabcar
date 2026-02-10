@@ -1,0 +1,28 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Space Grotesk', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background: radial-gradient(circle at top, rgba(56, 189, 248, 0.1), transparent 45%),
+    radial-gradient(circle at bottom, rgba(129, 140, 248, 0.08), transparent 40%),
+    linear-gradient(135deg, #0b1120 0%, #0f172a 40%, #020617 100%);
+  min-height: 100vh;
+}
+
+.glass-panel {
+  background: rgba(15, 23, 42, 0.85);
+  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(148, 163, 184, 0.08);
+  border-radius: 16px;
+  backdrop-filter: blur(16px);
+}
+
+.accent-divider {
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.6), rgba(129, 140, 248, 0.6));
+  height: 1px;
+  border-radius: 999px;
+}
+
