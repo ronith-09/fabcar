@@ -1,0 +1,14 @@
+{
+  "token_1": {
+    "token_id": "token_1",
+    "bank_api_base_url": "http://localhost:4000",
+    "bank_auth_key": "demo-bank-secret",
+    "updated_at": "2025-12-30T19:22:27.425Z"
+  },
+  "token_2": {
+    "token_id": "token_2",
+    "bank_api_base_url": "http://localhost:8080",
+    "bank_auth_key": "cust-secret-123",
+    "updated_at": "2026-01-01T16:09:14.494Z"
+  }
+}

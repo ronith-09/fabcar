@@ -1,0 +1,191 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Token Integration</title>
+    <style>
+      body{font-family:system-ui,Arial;margin:24px;background:#f8fafc;color:#0f172a}
+      .container{max-width:980px;margin:auto;background:white;padding:20px;border-radius:10px;box-shadow:0 8px 30px rgba(2,6,23,0.07)}
+      h1{margin:0 0 6px}
+      pre{background:#0b1220;color:#e6eef8;padding:12px;border-radius:8px;overflow:auto}
+      .row{display:flex;gap:12px}
+      .col{flex:1}
+      button{background:#2563eb;color:white;padding:10px 14px;border-radius:8px;border:none;cursor:pointer}
+      label{display:block;margin:8px 0 4px;color:#475569}
+      input,select{width:100%;padding:10px;border-radius:8px;border:1px solid #e6eef8}
+      .small{font-size:13px;color:#6b7280}
+      .lanes{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+      .lane-card{border:1px solid #e2e8f0;border-radius:12px;padding:16px;background:#f8fafc}
+      .lane-card h3{margin-top:0;margin-bottom:8px}
+      .lane-card ul,.lane-card ol{margin:0;padding-left:18px;font-size:13px;color:#475569}
+      .lane-card pre{margin:0;background:#0b1220;color:#e6eef8;padding:12px;border-radius:8px;font-size:12px}
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Token Integration</h1>
+      <p class="small">Enter token id to view integration instructions and run a connectivity test.</p>
+      <div class="row">
+        <div class="col">
+          <label>Token ID</label>
+          <input id="tokenId" placeholder="token_1" />
+        </div>
+        <div style="width:160px">
+          <label>&nbsp;</label>
+          <button id="loadBtn">Load</button>
+        </div>
+      </div>
+
+      <section id="guideSection" style="margin-top:18px;display:none">
+        <h2>Integration Guide</h2>
+        <div id="guide"></div>
+        <h3>Examples</h3>
+        <pre id="curlExample"></pre>
+        <pre id="nodeExample"></pre>
+      </section>
+
+      <section id="laneSection" style="margin-top:18px;display:none">
+        <h2>BetweenNetwork Lane</h2>
+        <p class="small">Give this runbook to every owner so they can self-connect their databases without bank-side rewiring.</p>
+        <div class="lanes">
+          <article class="lane-card">
+            <h3>Required Details</h3>
+            <ul id="laneRequirements">
+              <li>Token id</li>
+              <li>Owner wallet label</li>
+              <li>Owner networkAddress</li>
+              <li>x-bank-api-key header</li>
+            </ul>
+          </article>
+          <article class="lane-card">
+            <h3>API Checklist</h3>
+            <ol id="laneSteps">
+              <li>GET integration metadata</li>
+              <li>POST registration payload</li>
+              <li>Verify via /test-call</li>
+            </ol>
+          </article>
+          <article class="lane-card">
+            <h3>Sample Payload</h3>
+            <pre id="lanePayload">Load a token to preview payload.</pre>
+          </article>
+        </div>
+      </section>
+
+      <section id="testSection" style="margin-top:18px;display:none">
+        <h2>Run Test Call</h2>
+        <label>Owner user id (wallet label)</label>
+        <input id="ownerUserId" placeholder="bank1" />
+        <label>Test networkAddress (optional)</label>
+        <input id="testNetworkAddress" placeholder="base64-network-address" />
+        <div style="margin-top:12px">
+          <button id="runTest">Run Test</button>
+        </div>
+        <pre id="testResult" style="margin-top:12px">Test results will appear here.</pre>
+      </section>
+
+      <section id="regsSection" style="margin-top:18px;display:none">
+        <h2>Token Registrations</h2>
+        <pre id="regsList">No registrations yet.</pre>
+      </section>
+    </div>
+
+    <script>
+      const BETWEEN = (window.__BETWEEN_API_BASE__ || 'http://localhost:3001').replace(/\/$/, '');
+      const loadBtn = document.getElementById('loadBtn');
+      const tokenIdInput = document.getElementById('tokenId');
+      const guideSection = document.getElementById('guideSection');
+      const guideEl = document.getElementById('guide');
+      const curlExample = document.getElementById('curlExample');
+      const nodeExample = document.getElementById('nodeExample');
+      const laneSection = document.getElementById('laneSection');
+      const laneRequirements = document.getElementById('laneRequirements');
+      const laneSteps = document.getElementById('laneSteps');
+      const lanePayload = document.getElementById('lanePayload');
+      const testSection = document.getElementById('testSection');
+      const regsSection = document.getElementById('regsSection');
+      const regsList = document.getElementById('regsList');
+      const ownerUserIdInput = document.getElementById('ownerUserId');
+      const testNetworkAddressInput = document.getElementById('testNetworkAddress');
+      const runTestBtn = document.getElementById('runTest');
+      const testResult = document.getElementById('testResult');
+
+      loadBtn.addEventListener('click', async () => {
+        const tokenId = tokenIdInput.value.trim();
+        if (!tokenId) return alert('Enter token id');
+        guideSection.style.display = 'none';
+        testSection.style.display = 'none';
+        regsSection.style.display = 'none';
+        try {
+          const r = await fetch(`${BETWEEN}/api/token/${encodeURIComponent(tokenId)}/integration`);
+          const j = await r.json();
+          if (!j.success) throw new Error(j.detail || 'Failed to load');
+          const g = j.guide;
+          guideEl.innerHTML = `<p class="small"><strong>Owner:</strong> ${g.ownerUserId || 'not set'} — <strong>Owner networkAddress:</strong> ${g.ownerNetworkAddress || 'not set'}</p><p><strong>Endpoints:</strong></p><ul>${Object.keys(g.endpoints).map(k=>`<li><strong>${k}</strong>: ${g.endpoints[k]}</li>`).join('')}</ul>`;
+          curlExample.textContent = g.examples.curl_register;
+          nodeExample.textContent = g.examples.node_fetch;
+          ownerUserIdInput.value = g.ownerUserId || '';
+          guideSection.style.display = 'block';
+          laneRequirements.innerHTML = `
+            <li><strong>Token id:</strong> ${tokenId}</li>
+            <li><strong>Owner wallet label:</strong> ${g.ownerUserId || 'assign per owner'}</li>
+            <li><strong>Owner networkAddress:</strong> ${g.ownerNetworkAddress || 'generated per owner'}</li>
+            <li><strong>API base:</strong> ${BETWEEN}</li>`;
+          const stepList = [
+            `GET ${BETWEEN}/api/token/${encodeURIComponent(tokenId)}/integration to fetch metadata`,
+            `POST registration payload to ${g.endpoints?.register || g.endpoints?.registerOwner || 'the registration endpoint returned above'}`,
+            `POST test payload to ${BETWEEN}/api/token/${encodeURIComponent(tokenId)}/test-call to validate connectivity`
+          ];
+          laneSteps.innerHTML = stepList.map(step => `<li>${step}</li>`).join('');
+          const payloadDoc = {
+            headers: {
+              'Content-Type': 'application/json',
+              'x-bank-api-key': 'your-bank-api-key'
+            },
+            body: {
+              tokenId,
+              ownerUserId: g.ownerUserId || '<owner wallet label>',
+              ownerNetworkAddress: g.ownerNetworkAddress || '<owner network address>',
+              additionalData: 'include owner DB endpoint, callback URLs, etc.'
+            }
+          };
+          lanePayload.textContent = JSON.stringify(payloadDoc, null, 2);
+          laneSection.style.display = 'block';
+          testSection.style.display = 'block';
+
+          // load registrations
+          const r2 = await fetch(`${BETWEEN}/api/token/${encodeURIComponent(tokenId)}/registrations`);
+          const j2 = await r2.json();
+          if (j2.success) {
+            regsList.textContent = JSON.stringify(j2.registrations || [], null, 2);
+          } else {
+            regsList.textContent = 'No registrations or failed to read.';
+          }
+          regsSection.style.display = 'block';
+        } catch (err) {
+          alert('Failed to load integration: ' + (err.message || err));
+        }
+      });
+
+      runTestBtn.addEventListener('click', async () => {
+        const tokenId = tokenIdInput.value.trim();
+        if (!tokenId) return alert('Enter token id');
+        const ownerUserId = ownerUserIdInput.value.trim();
+        const testNetworkAddress = testNetworkAddressInput.value.trim();
+        testResult.textContent = 'Running...';
+        try {
+          const resp = await fetch(`${BETWEEN}/api/token/${encodeURIComponent(tokenId)}/test-call`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ownerUserId, testNetworkAddress })
+          });
+          const j = await resp.json();
+          testResult.textContent = JSON.stringify(j, null, 2);
+        } catch (err) {
+          testResult.textContent = String(err.message || err);
+        }
+      });
+    </script>
+  </body>
+</html>
