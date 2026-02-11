@@ -21,6 +21,14 @@ const normalizeRole = (apiRole, fallbackRole) => {
   return fallbackRole && allowed.includes(fallbackRole) ? fallbackRole : 'customer';
 };
 
+const resolveNetworkAddressFromPayload = payload => (
+  payload?.network_address ||
+  payload?.networkAddress ||
+  payload?.wallet?.network_address ||
+  payload?.wallet?.networkAddress ||
+  ''
+);
+
 const RegistrationDashboard = ({ onAuthenticate }) => {
   const [walletUsers, setWalletUsers] = useState([]);
   const [health, setHealth] = useState(null);
@@ -85,9 +93,42 @@ const RegistrationDashboard = ({ onAuthenticate }) => {
         if (loginResponse?.token) {
           window.localStorage.setItem('authToken', loginResponse.token);
         }
+        window.localStorage.setItem('userName', username);
+        window.localStorage.setItem('userRole', resolvedRole);
       } catch (e) {
         console.warn('Failed to persist auth token:', e);
       }
+
+      try {
+        // Build a registration snapshot on login so role dashboards can hydrate identity immediately.
+        let networkAddress = resolveNetworkAddressFromPayload(loginResponse);
+
+        if (!networkAddress && resolvedRole === 'customer') {
+          const wallet = await safeGet(
+            '/customer/wallet',
+            { params: { userId: username }, throwError: true },
+            null
+          );
+          networkAddress = resolveNetworkAddressFromPayload(wallet);
+        }
+
+        const snapshot = {
+          username,
+          role: resolvedRole,
+          network_address: networkAddress || '',
+          wallet_created: true,
+          timestamp: Date.now()
+        };
+
+        window.localStorage.setItem('latestRegistrationCredentials', JSON.stringify(snapshot));
+        if (networkAddress) {
+          window.localStorage.setItem('userNetworkAddress', networkAddress);
+        }
+        window.dispatchEvent(new CustomEvent('latest-registration-credentials', { detail: snapshot }));
+      } catch (snapshotError) {
+        console.warn('Failed to build login identity snapshot:', snapshotError);
+      }
+
       setLoginStatus(`Access granted as ${resolvedRole}`);
       onAuthenticate?.(resolvedRole);
     } catch (error) {

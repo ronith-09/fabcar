@@ -1877,53 +1877,120 @@ const BankDashboard = () => {
         </div>
       )}
       {walletSnapshot.data && !walletSnapshot.loading && (
-        <div className="glass-panel p-6 border border-white/5 grid gap-4 md:grid-cols-3">
+        <div className="glass-panel p-6 border border-white/5 space-y-6">
           <div>
-            <p className="text-xs uppercase text-white/50">Primary Currency</p>
-            <p className="text-xl font-semibold">{walletSnapshot.data.currency || 'Pending assignment'}</p>
+            <p className="text-xs uppercase tracking-wide text-white/40">Wallet</p>
           </div>
-          <div>
-            <p className="text-xs uppercase text-white/50">Minted Supply</p>
-            <p className="text-xl font-semibold">
-              {walletSnapshot.data.mintedCoinsDisplay ||
-                walletSnapshot.data.minted_coins_display ||
-                walletSnapshot.data.mintedCoins ||
-                0}
-            </p>
+
+          <div className="space-y-4">
+            <div>
+              <p className="text-xs uppercase text-white/50">Balance</p>
+              <p className="text-2xl font-semibold text-white">
+                {walletSnapshot.data.walletBalanceDisplay ||
+                  walletSnapshot.data.wallet_balance_display ||
+                  walletSnapshot.data.availableBalanceDisplay ||
+                  (walletSnapshot.data.currencySymbol || walletSnapshot.data.currency_symbol || '$') +
+                  (walletSnapshot.data.walletBalance ||
+                    walletSnapshot.data.wallet_balance ||
+                    walletSnapshot.data.availableBalance ||
+                    0).toLocaleString()}
+                {' '}
+                {walletSnapshot.data.currency || walletSnapshot.data.currency_symbol || ''}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-white/50">Token ID</p>
+              <p className="text-lg font-semibold text-white">
+                {walletSnapshot.data.tokenID ||
+                  walletSnapshot.data.token_id ||
+                  walletSnapshot.data.token ||
+                  '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-white/50">Status</p>
+              <p className="text-lg font-semibold text-green-400">
+                ✅ {walletSnapshot.data.registration?.status
+                  ? walletSnapshot.data.registration.status.replace(/_/g, ' ')
+                  : walletSnapshot.data.isTokenOwner
+                    ? 'Approved'
+                    : 'Approved'}
+              </p>
+            </div>
           </div>
-          <div>
-            <p className="text-xs uppercase text-white/50">Wallet Balance</p>
-            <p className="text-xl font-semibold">
-              {walletSnapshot.data.walletBalanceDisplay ||
-                walletSnapshot.data.wallet_balance_display ||
-                (walletSnapshot.data.currencySymbol || walletSnapshot.data.currency_symbol || '$') +
-                (walletSnapshot.data.walletBalance ||
-                  walletSnapshot.data.wallet_balance ||
-                  0).toLocaleString()}
-            </p>
-          </div>
-        </div>
-      )}
-      {walletSnapshot.data && foreignCurrencies.length > 0 && (
-        <div className="glass-panel p-6 border border-accent/20 space-y-4">
-          <div>
-            <p className="text-xs uppercase text-white/50">Foreign Currency Holdings</p>
-            <p className="text-sm text-white/60">
-              Balances received from other tokens are tracked separately from your domestic currency.
-            </p>
-          </div>
-          <div className="grid gap-4 md:grid-cols-3">
-            {foreignCurrencies.map((fx, idx) => (
-              <div key={`${fx.currency || 'foreign'}-${idx}`} className="bg-white/5 rounded-xl p-4 space-y-2">
-                <div className="text-xs uppercase text-white/50">Currency</div>
-                <div className="text-lg font-semibold text-white">{fx.currency || 'Foreign'}</div>
-                <div className="text-xs uppercase text-white/50">Balance</div>
-                <div className="text-lg font-semibold text-white">
-                  {fx.display ||
-                    `${fx.currency_symbol || ''}${(fx.amount || 0).toLocaleString()}`}
+
+          <div className="bg-white/5 rounded-xl p-4 space-y-4">
+            <p className="text-xs uppercase text-white/50">Account Details</p>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <div className="text-sm text-white/70">Network Address:</div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-mono text-white/90">
+                    {truncateId(
+                      walletSnapshot.data.networkAddress ||
+                        walletSnapshot.data.network_address ||
+                        '—',
+                      20
+                    )}
+                  </p>
+                  <button
+                    onClick={() => {
+                      const full =
+                        walletSnapshot.data.networkAddress ||
+                        walletSnapshot.data.network_address ||
+                        '';
+                      if (full) {
+                        navigator.clipboard.writeText(full);
+                        alert('Network Address copied!');
+                      }
+                    }}
+                    className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-xs text-white/70 transition"
+                  >
+                    [COPY]
+                  </button>
                 </div>
               </div>
-            ))}
+
+              <div className="flex items-center justify-between gap-4">
+                <div className="text-sm text-white/70">Token Transfer ID:</div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-mono text-white/90">
+                    {truncateId(
+                      walletSnapshot.data.tokenTransferID ||
+                        walletSnapshot.data.token_transfer_id ||
+                        (Array.isArray(walletSnapshot.data.token_transfer_ids)
+                          ? walletSnapshot.data.token_transfer_ids[0]
+                          : ''),
+                      24
+                    ) || '—'}
+                  </p>
+                  <button
+                    onClick={() => {
+                      const full =
+                        walletSnapshot.data.tokenTransferID ||
+                        walletSnapshot.data.token_transfer_id ||
+                        (Array.isArray(walletSnapshot.data.token_transfer_ids)
+                          ? walletSnapshot.data.token_transfer_ids[0]
+                          : '');
+                      if (full) {
+                        navigator.clipboard.writeText(full);
+                        alert('Token Transfer ID copied!');
+                      }
+                    }}
+                    className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-xs text-white/70 transition"
+                  >
+                    [COPY]
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-4">
+                <div className="text-sm text-white/70">Registered On:</div>
+                <div className="text-sm text-white/90">
+                  {formatDate(walletSnapshot.data.registration?.created_at || walletSnapshot.data.created_at)}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

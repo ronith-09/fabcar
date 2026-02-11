@@ -29,15 +29,15 @@ export async function initiateCustomerToTokenTransfer(
   }
 }
 
-export async function approveBySenderBank(
-  transferId,
-  approved
-) {
+export async function approveBySenderBank(transferId, approved) {
+  if (!approved) {
+    throw new Error('Rejecting transfers is not supported by the current API.');
+  }
   try {
     const response = await safePost(
-      `/customer-to-token-transfer/${transferId}/sender-approve`,
+      `/bank/customer-to-token-transfers/approve-sender`,
       {
-        approved: Boolean(approved)
+        transferRequestID: transferId
       },
       { throwError: true }
     );
@@ -48,15 +48,15 @@ export async function approveBySenderBank(
   }
 }
 
-export async function approveByReceiverBank(
-  transferId,
-  approved
-) {
+export async function approveByReceiverBank(transferId, approved) {
+  if (!approved) {
+    throw new Error('Rejecting transfers is not supported by the current API.');
+  }
   try {
     const response = await safePost(
-      `/customer-to-token-transfer/${transferId}/receiver-approve`,
+      `/bank/customer-to-token-transfers/approve-receiver`,
       {
-        approved: Boolean(approved)
+        transferRequestID: transferId
       },
       { throwError: true }
     );

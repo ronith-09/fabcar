@@ -23,6 +23,7 @@ const {
     getPendingMintRequests,
     getApprovedMintRequests,
     getApprovedMintRequestsForCustomer,
+    getMyApprovedMintRequests,
     approveMintRequest,
     getWalletInfo,
     viewAllTokens,
@@ -41,6 +42,7 @@ const {
     viewPendingCustomerMintRequests,
     approveCustomerMint,
     viewCustomerWallet,
+    getCustomerIDAccess,
 
     createTransferRequest,
     createTokenTransferRequest,
@@ -2358,6 +2360,7 @@ app.get('/api/customer/wallet', async (req, res) => {
             },
             token_id: walletData.tokenID || effectiveTokenID,
             network_address: walletData.networkAddress || networkAddress,
+            customer_id: walletData.customerID || walletData.customer_id || null,
             participant_transfer_id: walletData.participantTransferID || walletData.participant_transfer_id || null,
             token_transfer_id: walletData.tokenTransferID || walletData.token_transfer_id || null,
             participant_transfer_ids: participantTransferIDs,
@@ -2379,6 +2382,48 @@ app.get('/api/customer/wallet', async (req, res) => {
     } catch (error) {
         console.error('Wallet error:', error);
         res.status(500).json({
+            success: false,
+            detail: error.message
+        });
+    }
+});
+
+// Customer token-level ID access endpoint
+app.get('/api/customer/id-access', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const networkAddress = getNetworkAddressForUser(caller);
+        const tokenID = (req.query.tokenID || req.query.tokenId || '').trim();
+
+        if (!networkAddress) {
+            return res.status(400).json({
+                success: false,
+                detail: 'Customer network address not found. Please register first.'
+            });
+        }
+        if (!tokenID) {
+            return res.status(400).json({
+                success: false,
+                detail: 'tokenID is required'
+            });
+        }
+
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const access = await getCustomerIDAccess(networkAddress, tokenID, walletPath, caller);
+
+        return res.json({
+            success: true,
+            access: {
+                token_id: access.token_id || tokenID,
+                network_address: access.network_address || networkAddress,
+                customer_id: access.customer_id || null,
+                approved: Boolean(access.approved),
+                status: access.status || (access.approved ? 'approved' : 'pending')
+            }
+        });
+    } catch (error) {
+        console.error('Customer ID access error:', error);
+        return res.status(500).json({
             success: false,
             detail: error.message
         });
@@ -4398,7 +4443,7 @@ app.get('/api/bank/customer-mint-requests/pending', authenticateJWT, async (req,
             const normalized = Array.isArray(pendingMintRequests)
                 ? pendingMintRequests.map(req => ({
                     ...req,
-                    customer_id: req.customer_id || req.customerId || req.requested_by_name || '',
+                    customer_id: req.customer_id || req.CustomerID || req.customerId || req.requested_by_name || '',
                     name: req.name || req.customer_name || '',
                     kyc_id: (req.kyc_id || req.kycId) || '',
                     kyc_status: (req.kyc_status || req.kycStatus) || '',
@@ -4981,7 +5026,7 @@ app.get('/api/participant-mint-requests/approved', async (req, res) => {
                 })
                 .map(req => ({
                     ...req,
-                    customer_id: req.customer_id || req.customerId || req.requested_by_name || '',
+                    customer_id: req.customer_id || req.CustomerID || req.customerId || req.requested_by_name || '',
                     name: req.name || req.customer_name || '',
                     kyc_id: (req.kyc_id || req.kycId) || '',
                     kyc_status: (req.kyc_status || req.kycStatus) || ''
@@ -6182,6 +6227,8 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
                         net_amount: netReceived,
                         sender: transfer.SenderCustomerName || transfer.sender_customer_name || '',
                         receiver: transfer.ReceiverCustomerName || transfer.receiver_customer_name || '',
+                        sender_customer_token_id: transfer.SenderCustomerTokenID || transfer.sender_customer_token_id || '',
+                        receiver_customer_token_id: transfer.ReceiverCustomerTokenID || transfer.receiver_customer_token_id || '',
                         status: transfer.Status || transfer.status || 'Completed',
                         timestamp: completedAt,
                         sort_timestamp: completedAt ? new Date(completedAt).getTime() : 0,
@@ -6199,16 +6246,16 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
             // Get mint history if requested
             if (type === 'all' || type === 'mint') {
                 try {
-                    // SECURITY FIX: Use customer-specific function that filters by network address and validates caller
-                    const approvedMintRequests = await getApprovedMintRequestsForCustomer(
+                    // SECURITY: Use caller-only chaincode function (no customer input parameter)
+                    const approvedMintRequests = await getMyApprovedMintRequests(
                         walletPath,
-                        customerId,
-                        customerNetworkAddress
+                        customerId
                     );
 
                     const mappedMints = (Array.isArray(approvedMintRequests) ? approvedMintRequests : []).map(mintReq => ({
                         transaction_id: mintReq.RequestID || mintReq.request_id || '',
                         transaction_category: 'MINT', // Category label
+                        customer_id: mintReq.CustomerID || mintReq.customer_id || '',
                         transaction_type: 'CREDIT',
                         transaction_type_description: 'Funds added to account (Mint approved)',
                         amount: mintReq.Amount || mintReq.amount || 0,
@@ -6350,16 +6397,17 @@ app.get('/api/customer/mint-history', authenticateJWT, async (req, res) => {
         try {
             const walletPath = path.join(process.cwd(), 'wallet');
             
-            // Get approved mint requests for this customer (credit transactions)
-            const approvedMintRequests = await getApprovedMintRequests(
+            // Get approved mint requests for caller only.
+            // Chaincode derives caller identity from certificate and ignores external customer inputs.
+            const approvedMintRequests = await getMyApprovedMintRequests(
                 walletPath,
-                customerId,
-                customerNetworkAddress
+                customerId
             );
 
             // Map to response format with transaction type
             let mappedMintRequests = (Array.isArray(approvedMintRequests) ? approvedMintRequests : []).map(mintReq => ({
                 request_id: mintReq.RequestID || mintReq.request_id || '',
+                customer_id: mintReq.CustomerID || mintReq.customer_id || '',
                 transaction_type: 'CREDIT',
                 transaction_type_description: 'Funds added to account (Mint approved)',
                 token_id: mintReq.TokenID || mintReq.token_id || '',

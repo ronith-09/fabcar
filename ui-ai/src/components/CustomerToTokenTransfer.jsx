@@ -128,11 +128,7 @@ export default function CustomerToTokenTransfer({ userRole, userNetworkAddress, 
     setError(null);
 
     try {
-      const result = await approveBySenderBank(
-        transferId,
-        userNetworkAddress,
-        approve
-      );
+      const result = await approveBySenderBank(transferId, approve);
 
       setMessage({
         type: 'success',
@@ -154,11 +150,7 @@ export default function CustomerToTokenTransfer({ userRole, userNetworkAddress, 
     setError(null);
 
     try {
-      const result = await approveByReceiverBank(
-        transferId,
-        userNetworkAddress,
-        approve
-      );
+      const result = await approveByReceiverBank(transferId, approve);
 
       setMessage({
         type: 'success',

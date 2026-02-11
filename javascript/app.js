@@ -452,6 +452,45 @@ async function getApprovedMintRequests(walletPath, userId) {
     }
 }
 
+// Customer-scoped mint history: returns only approved mint requests for the authenticated customer
+async function getApprovedMintRequestsForCustomer(walletPath, userId, customerNetworkAddress) {
+    if (!customerNetworkAddress || !String(customerNetworkAddress).trim()) {
+        throw new Error('customerNetworkAddress is required');
+    }
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction(
+            'GetApprovedMintRequestsByNetworkAddress',
+            customerNetworkAddress
+        );
+        const payload = result.toString().trim();
+        if (!payload) {
+            return [];
+        }
+        const approved = JSON.parse(payload);
+        return Array.isArray(approved) ? approved : [];
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+// Customer-scoped mint history with no customer parameter.
+// Chaincode derives caller identity and returns only caller-owned approved mints.
+async function getMyApprovedMintRequests(walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('GetMyApprovedMintRequests');
+        const payload = result.toString().trim();
+        if (!payload) {
+            return [];
+        }
+        const approved = JSON.parse(payload);
+        return Array.isArray(approved) ? approved : [];
+    } finally {
+        gateway.disconnect();
+    }
+}
+
 async function participantOwnsToken(networkAddress, tokenID, walletPath, userId) {
     try {
         const tokens = await viewAllTokens(walletPath, userId);
@@ -660,6 +699,16 @@ async function viewCustomerWallet(networkAddress, tokenID, walletPath, userId) {
     const { gateway, contract } = await connect(walletPath, userId);
     try {
         const result = await contract.evaluateTransaction('ViewCustomerWallet', networkAddress, tokenID);
+        return JSON.parse(result.toString());
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+async function getCustomerIDAccess(networkAddress, tokenID, walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('GetCustomerIDAccess', networkAddress, tokenID);
         return JSON.parse(result.toString());
     } finally {
         gateway.disconnect();
@@ -936,7 +985,10 @@ module.exports = {
     viewPendingCustomerMintRequests,
     approveCustomerMint,
     viewCustomerWallet,
+    getCustomerIDAccess,
     getApprovedMintRequests,
+    getApprovedMintRequestsForCustomer,
+    getMyApprovedMintRequests,
     listApprovedParticipantMintRequests,
     createTransferRequest,
 

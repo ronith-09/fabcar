@@ -104,14 +104,9 @@ function App() {
       )}
 
       {activeRole === 'customer' && (
-        <DashboardSurface
-          icon="👤"
-          title="Customer Portal"
-          subtitle="Personal Banking Services"
-          onExit={handleExit}
-        >
+        <div className="min-h-screen bg-white text-slate-900">
           <CustomerDashboard />
-        </DashboardSurface>
+        </div>
       )}
     </div>
   );

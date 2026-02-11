@@ -280,6 +280,14 @@ const CustomerTransactionHistoryDisplay = ({ data }) => {
                       </button>
                     </div>
                   </div>
+
+                  {/* Raw Backend Details */}
+                  <div className="space-y-2 pt-3 border-t border-white/10">
+                    <p className="text-xs text-white/50 uppercase tracking-wide">All Details (Backend)</p>
+                    <pre className="bg-black/30 rounded-lg p-4 text-xs text-white/70 font-mono whitespace-pre-wrap break-words">
+                      {JSON.stringify(tx, null, 2)}
+                    </pre>
+                  </div>
                 </div>
               )}
             </div>
