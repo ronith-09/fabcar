@@ -1,30 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
   <defs>
     <style>
-      .line { stroke: #111; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
-      .node { fill: #fff; stroke: #111; stroke-width: 4; }
-      .ring { fill: #fff; stroke: #111; stroke-width: 5; }
-      .core { fill: #111; }
-      .mark { fill: #fff; font-family: Arial, sans-serif; font-size: 30px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; }
+      .stroke { stroke: #FFFFFF; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+      .node { fill: #FFFFFF; }
+      .ring { fill: none; stroke: #FFFFFF; stroke-width: 2; }
+      .letter { fill: #FFFFFF; font-family: Arial, sans-serif; font-size: 36px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
     </style>
   </defs>
 
-  <polygon class="line" points="60,12 102,36 102,84 60,108 18,84 18,36" />
-  <line class="line" x1="60" y1="12" x2="60" y2="30" />
-  <line class="line" x1="102" y1="36" x2="86" y2="46" />
-  <line class="line" x1="102" y1="84" x2="86" y2="74" />
-  <line class="line" x1="60" y1="108" x2="60" y2="90" />
-  <line class="line" x1="18" y1="84" x2="34" y2="74" />
-  <line class="line" x1="18" y1="36" x2="34" y2="46" />
+  <!-- Hexagon: 6 lines connecting the 6 vertex nodes -->
+  <line class="stroke" x1="60" y1="16" x2="98" y2="38" />
+  <line class="stroke" x1="98" y1="38" x2="98" y2="82" />
+  <line class="stroke" x1="98" y1="82" x2="60" y2="104" />
+  <line class="stroke" x1="60" y1="104" x2="22" y2="82" />
+  <line class="stroke" x1="22" y1="82" x2="22" y2="38" />
+  <line class="stroke" x1="22" y1="38" x2="60" y2="16" />
 
-  <circle class="node" cx="60" cy="12" r="5.5" />
-  <circle class="node" cx="102" cy="36" r="5.5" />
-  <circle class="node" cx="102" cy="84" r="5.5" />
-  <circle class="node" cx="60" cy="108" r="5.5" />
-  <circle class="node" cx="18" cy="84" r="5.5" />
-  <circle class="node" cx="18" cy="36" r="5.5" />
+  <!-- 6 radial lines from center to each vertex -->
+  <line class="stroke" x1="60" y1="60" x2="60" y2="16" />
+  <line class="stroke" x1="60" y1="60" x2="98" y2="38" />
+  <line class="stroke" x1="60" y1="60" x2="98" y2="82" />
+  <line class="stroke" x1="60" y1="60" x2="60" y2="104" />
+  <line class="stroke" x1="60" y1="60" x2="22" y2="82" />
+  <line class="stroke" x1="60" y1="60" x2="22" y2="38" />
 
-  <circle class="ring" cx="60" cy="60" r="28" />
-  <circle class="core" cx="60" cy="60" r="23" />
-  <text class="mark" x="60" y="61">B</text>
+  <!-- 6 solid white circles at hexagon vertices -->
+  <circle class="node" cx="60" cy="16" r="4" />
+  <circle class="node" cx="98" cy="38" r="4" />
+  <circle class="node" cx="98" cy="82" r="4" />
+  <circle class="node" cx="60" cy="104" r="4" />
+  <circle class="node" cx="22" cy="82" r="4" />
+  <circle class="node" cx="22" cy="38" r="4" />
+
+  <!-- Central white circle outline with B inside -->
+  <circle class="ring" cx="60" cy="60" r="24" />
+  <text class="letter" x="60" y="60">B</text>
 </svg>

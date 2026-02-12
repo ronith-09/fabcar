@@ -26,3 +26,27 @@ body {
   border-radius: 999px;
 }
 
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']):not([type='submit']):not([type='button']):not([type='reset']),
+textarea,
+select {
+  color: #0f172a;
+  caret-color: #0f172a;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #64748b;
+}
+
+.glass-panel input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']):not([type='submit']):not([type='button']):not([type='reset']),
+.glass-panel textarea,
+.glass-panel select {
+  color: #f8fafc;
+  caret-color: #f8fafc;
+}
+
+.glass-panel input::placeholder,
+.glass-panel textarea::placeholder {
+  color: rgba(248, 250, 252, 0.6);
+}
+

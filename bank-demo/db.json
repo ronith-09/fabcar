@@ -1074,6 +1074,26 @@
       "kycId": "kyc_1770794857703",
       "kycStatus": true,
       "createdAt": "2026-02-11T07:27:37.703Z"
+    },
+    {
+      "eventId": "kyc_evt_1770822203280",
+      "tokenId": "token_1",
+      "networkAddress": "eDUwOTo6Q049Y3VzdGJhbmsxMSxPVT1vcmcxK09VPWNsaWVudCtPVT1kZXBhcnRtZW50MTo6Q049Y2Eub3JnMS5leGFtcGxlLmNvbSxPPW9yZzEuZXhhbXBsZS5jb20sTD1EdXJoYW0sU1Q9Tm9ydGggQ2Fyb2xpbmEsQz1VUw==",
+      "customerId": "u_1767733189022",
+      "customerName": "custbank11",
+      "kycId": "kyc_1770822203280",
+      "kycStatus": true,
+      "createdAt": "2026-02-11T15:03:23.280Z"
+    },
+    {
+      "eventId": "kyc_evt_1770918553699",
+      "tokenId": "token_1",
+      "networkAddress": "eDUwOTo6Q049Y3VzdGJhbmsxMSxPVT1vcmcxK09VPWNsaWVudCtPVT1kZXBhcnRtZW50MTo6Q049Y2Eub3JnMS5leGFtcGxlLmNvbSxPPW9yZzEuZXhhbXBsZS5jb20sTD1EdXJoYW0sU1Q9Tm9ydGggQ2Fyb2xpbmEsQz1VUw==",
+      "customerId": "u_1767733189022",
+      "customerName": "custbank11",
+      "kycId": "kyc_1770918553699",
+      "kycStatus": true,
+      "createdAt": "2026-02-12T17:49:13.699Z"
     }
   ],
   "anchors": []

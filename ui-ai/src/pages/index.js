@@ -1,5 +1,6 @@
 export { default as AdminDashboard } from './CommandCenter';
 export { default as BankDashboard } from './BankOperations';
+export { default as SimpleBankDashboard } from './SimpleBankDashboard';
 export { default as CustomerDashboard } from './CustomerDashboard';
 export { default as RegistrationDashboard } from './AdminConsole';
 export { default as RegistrationPortal } from './RegistrationPortal';

@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import {
   RegistrationDashboard,
   BankDashboard,
+  SimpleBankDashboard,
   AdminDashboard,
   CustomerDashboard
 } from './pages';
@@ -56,6 +57,7 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const [activeRole, setActiveRole] = useState(() => resolveRoleFromPath(location.pathname));
+  const [bankDashboardVersion, setBankDashboardVersion] = useState('advanced');
 
   useEffect(() => {
     const roleFromURL = resolveRoleFromPath(location.pathname);
@@ -93,14 +95,56 @@ function App() {
       )}
 
       {activeRole === 'bank' && (
-        <DashboardSurface
-          icon="🏦"
-          title="Bank Operations Center"
-          subtitle="Institutional Management"
-          onExit={handleExit}
-        >
-          <BankDashboard />
-        </DashboardSurface>
+        <>
+          {bankDashboardVersion === 'advanced' ? (
+            <DashboardSurface
+              icon="🏦"
+              title="Bank Operations Center"
+              subtitle="Institutional Management"
+              onExit={handleExit}
+            >
+              <div style={{ marginBottom: '16px' }}>
+                <button
+                  onClick={() => setBankDashboardVersion('simple')}
+                  style={{
+                    padding: '8px 16px',
+                    backgroundColor: '#5B7FD6',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                    fontWeight: '600'
+                  }}
+                >
+                  Switch to Simple Dashboard
+                </button>
+              </div>
+              <BankDashboard />
+            </DashboardSurface>
+          ) : (
+            <>
+              <div style={{ padding: '16px 40px' }}>
+                <button
+                  onClick={() => setBankDashboardVersion('advanced')}
+                  style={{
+                    padding: '8px 16px',
+                    backgroundColor: '#333',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                    fontWeight: '600'
+                  }}
+                >
+                  Switch to Advanced Dashboard
+                </button>
+              </div>
+              <SimpleBankDashboard />
+            </>
+          )}
+        </>
       )}
 
       {activeRole === 'customer' && (

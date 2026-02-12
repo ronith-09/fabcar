@@ -42,7 +42,7 @@ const normalizeBalance = balance => {
 
 const formatCurrency = wallet => {
   if (!wallet) return '';
-  return wallet.currency || wallet.currency_symbol || wallet.currencySymbol || '';
+  return wallet.currency || wallet.currencyCode || wallet.currency_code || '';
 };
 
 const resolveWalletPayload = walletData => {
@@ -74,7 +74,14 @@ const truncateId = (id, length = 30) => {
 
 const resolveCustomerAccessPayload = payload => {
   if (!payload) return null;
-  return payload.data || payload.customer_access || payload.result || payload;
+  return (
+    payload.access ||
+    payload.data?.access ||
+    payload.data ||
+    payload.customer_access ||
+    payload.result ||
+    payload
+  );
 };
 
 const resolveCustomerNetworkAddress = (identity, walletData) => {
@@ -250,7 +257,7 @@ const CustomerDashboard = () => {
         throw new Error('Amount must be a positive number.');
       }
 
-      const { data } = await client.post('/api/customer-to-token-transfer', {
+      const { data } = await client.post('/customer-to-token-transfer', {
         senderTokenID: trimmedSenderTokenID,
         receiverTokenID: trimmedReceiverTokenID,
         receiverCustomerNetworkAddress: trimmedReceiverAddress,
@@ -378,7 +385,7 @@ const CustomerDashboard = () => {
     }
   };
 
-  // Sidebar items, no extra text
+  // Sidebar items
   const sidebarItems = [
     { key: 'wallet', label: 'Wallet', icon: '👤' },
     { key: 'send', label: 'Send Money', icon: '💸' },
@@ -387,40 +394,62 @@ const CustomerDashboard = () => {
   ];
 
   return (
-    <div style={{ display: 'flex', height: '100vh', backgroundColor: '#fff' }}>
-      {/* Left Sidebar */}
-      <div style={{
-        width: '220px',
-        backgroundColor: '#fff',
-        borderRight: '1px solid #E0E0E0',
-        padding: '20px 0',
-        overflowY: 'auto',
+    <div
+      style={{
         display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        minWidth: '180px'
-      }}>
-        {/* Sidebar Menu Items - no extra text */}
-        <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        height: '100vh',
+        backgroundColor: '#F8FAFC',
+        color: '#0F172A',
+        fontFamily:
+          'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+      }}
+    >
+      {/* Left Sidebar */}
+      <div
+        style={{
+          width: '220px',
+          backgroundColor: '#0F172A',
+          borderRight: '1px solid rgba(15,23,42,0.5)',
+          padding: '20px 0',
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          minWidth: '180px'
+        }}
+      >
+        {/* Sidebar Menu */}
+        <div
+          style={{
+            width: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px'
+          }}
+        >
           {sidebarItems.map(item => (
             <button
               key={item.key}
               onClick={() => setActiveLane(item.key)}
               style={{
                 width: '100%',
-                padding: '14px 0 14px 32px',
+                padding: '12px 0 12px 28px',
                 border: 'none',
-                backgroundColor: activeLane === item.key ? '#F5F5F5' : 'transparent',
-                borderLeft: activeLane === item.key ? '4px solid #333' : '4px solid transparent',
+                backgroundColor:
+                  activeLane === item.key ? '#1E3A8A' : 'transparent',
+                borderLeft:
+                  activeLane === item.key
+                    ? '4px solid #1E3A8A'
+                    : '4px solid transparent',
                 textAlign: 'left',
                 cursor: 'pointer',
-                transition: 'all 0.2s',
+                transition: 'all 0.18s ease-out',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '14px',
-                borderRadius: '0 8px 8px 0',
-                fontSize: '15px',
-                color: activeLane === item.key ? '#000' : '#666',
+                gap: '12px',
+                borderRadius: '0 999px 999px 0',
+                fontSize: '14px',
+                color: activeLane === item.key ? '#FFFFFF' : '#94A3B8',
                 fontWeight: activeLane === item.key ? 600 : 500
               }}
             >
@@ -432,28 +461,56 @@ const CustomerDashboard = () => {
       </div>
 
       {/* Main Content */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        {/* Header */}
-        <div style={{
-          backgroundColor: '#fff',
-          borderBottom: '1px solid #E0E0E0',
-          padding: '0 40px',
-          height: '82px',
+      <div
+        style={{
+          flex: 1,
           display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: '20px',
+          flexDirection: 'column',
           minWidth: 0
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            backgroundColor: '#0F172A',
+            borderBottom: '1px solid rgba(15,23,42,0.5)',
+            padding: '0 40px',
+            height: '82px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '20px',
+            minWidth: 0
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <img
               src="/betweenetwork-logo.svg"
-              alt="Betweenetwork logo"
-              style={{ width: '46px', height: '46px', objectFit: 'contain' }}
+              alt="Between Network logo"
+              style={{ width: '40px', height: '40px', objectFit: 'contain' }}
             />
-            <span style={{ fontSize: '28px', fontWeight: 700, color: '#111', letterSpacing: '0.2px' }}>
-              Betweenetwork
-            </span>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <span
+                style={{
+                  fontSize: '22px',
+                  fontWeight: 700,
+                  color: '#FFFFFF',
+                  letterSpacing: '0.03em'
+                }}
+              >
+                Between Network
+              </span>
+              <span
+                style={{
+                  fontSize: '11px',
+                  color: '#94A3B8',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.16em'
+                }}
+              >
+                Cross‑border customer wallet
+              </span>
+            </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
           <div style={{ position: 'relative' }}>
@@ -468,14 +525,15 @@ const CustomerDashboard = () => {
                 }
               }}
               style={{
-                padding: '8px 12px',
-                border: '1px solid #DDD',
+                padding: '8px 16px',
+                border: 'none',
                 borderRadius: '6px',
                 fontSize: '14px',
                 fontFamily: 'inherit',
                 cursor: 'pointer',
-                backgroundColor: 'white',
-                color: '#333'
+                backgroundColor: '#1E3A8A',
+                color: '#FFFFFF',
+                fontWeight: 500
               }}
             >
               Register Token
@@ -485,24 +543,24 @@ const CustomerDashboard = () => {
                 position: 'absolute',
                 top: '44px',
                 right: '0',
-                backgroundColor: 'white',
-                border: '1px solid #DDD',
+                backgroundColor: '#FFFFFF',
+                border: '1px solid #E2E8F0',
                 borderRadius: '8px',
                 minWidth: '320px',
                 maxWidth: '420px',
                 padding: '12px',
-                boxShadow: '0 6px 20px rgba(0,0,0,0.12)',
+                boxShadow: '0px 4px 16px rgba(15,23,42,0.06)',
                 zIndex: 1000
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <div style={{ fontSize: '13px', fontWeight: 600, color: '#333' }}>Available Tokens</div>
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: '#0F172A' }}>Available Tokens</div>
                   <button
                     onClick={() => setShowRegisterTokens(false)}
                     style={{
                       border: 'none',
                       background: 'transparent',
                       cursor: 'pointer',
-                      color: '#666',
+                      color: '#64748B',
                       fontSize: '12px'
                     }}
                   >
@@ -516,22 +574,22 @@ const CustomerDashboard = () => {
                     padding: '8px 10px',
                     borderRadius: '6px',
                     fontSize: '12px',
-                    backgroundColor: registerStatus.state === 'error' ? '#FFECEC' : '#E9F7EF',
-                    color: registerStatus.state === 'error' ? '#C62828' : '#2E7D32',
-                    border: `1px solid ${registerStatus.state === 'error' ? '#F5B5B5' : '#B7E4C7'}`
+                    backgroundColor: registerStatus.state === 'error' ? '#FEE2E2' : '#ECFDF3',
+                    color: registerStatus.state === 'error' ? '#DC2626' : '#15803D',
+                    border: `1px solid ${registerStatus.state === 'error' ? '#FECACA' : '#BBF7D0'}`
                   }}>
                     {registerStatus.message}
                   </div>
                 )}
 
                 {tokens.loading && (
-                  <div style={{ fontSize: '12px', color: '#666' }}>Loading tokens...</div>
+                  <div style={{ fontSize: '12px', color: '#64748B' }}>Loading tokens...</div>
                 )}
                 {tokens.error && (
-                  <div style={{ fontSize: '12px', color: '#C62828' }}>{tokens.error}</div>
+                  <div style={{ fontSize: '12px', color: '#DC2626' }}>{tokens.error}</div>
                 )}
                 {!tokens.loading && !tokens.error && tokens.data.length === 0 && (
-                  <div style={{ fontSize: '12px', color: '#666' }}>No tokens available.</div>
+                  <div style={{ fontSize: '12px', color: '#64748B' }}>No tokens available.</div>
                 )}
                 {!tokens.loading && !tokens.error && tokens.data.length > 0 && (
                   <div style={{ display: 'grid', gap: '8px' }}>
@@ -539,12 +597,12 @@ const CustomerDashboard = () => {
                       .filter(token => token?.available === false)
                       .map(token => (
                       <div key={token.token_id} style={{
-                        border: '1px solid #EEE',
+                        border: '1px solid #E2E8F0',
                         borderRadius: '8px',
                         padding: '10px',
-                        backgroundColor: '#FAFAFA'
+                        backgroundColor: '#F8FAFC'
                       }}>
-                        <div style={{ fontSize: '13px', fontWeight: 600, color: '#333' }}>
+                        <div style={{ fontSize: '13px', fontWeight: 600, color: '#0F172A' }}>
                           {token.currency || 'Token'}
                         </div>
                         <div style={{ marginTop: '6px', display: 'grid', gap: '4px' }}>
@@ -573,8 +631,8 @@ const CustomerDashboard = () => {
                             padding: '8px 10px',
                             borderRadius: '6px',
                             border: 'none',
-                            backgroundColor: '#1F2937',
-                            color: 'white',
+                            backgroundColor: '#1E3A8A',
+                            color: '#FFFFFF',
                             fontSize: '12px',
                             cursor: 'pointer',
                             fontWeight: 600
@@ -598,14 +656,15 @@ const CustomerDashboard = () => {
                 }
               }}
               style={{
-                padding: '8px 12px',
-                border: '1px solid #DDD',
+                padding: '8px 16px',
+                border: 'none',
                 borderRadius: '6px',
                 fontSize: '14px',
                 fontFamily: 'inherit',
                 cursor: 'pointer',
-                backgroundColor: 'white',
-                color: '#333'
+                backgroundColor: '#1E3A8A',
+                color: '#FFFFFF',
+                fontWeight: 500
               }}
             >
               Customer ID Access
@@ -615,24 +674,24 @@ const CustomerDashboard = () => {
                 position: 'absolute',
                 top: '44px',
                 right: '0',
-                backgroundColor: 'white',
-                border: '1px solid #DDD',
+                backgroundColor: '#FFFFFF',
+                border: '1px solid #E2E8F0',
                 borderRadius: '8px',
                 minWidth: '360px',
                 maxWidth: '460px',
                 padding: '12px',
-                boxShadow: '0 6px 20px rgba(0,0,0,0.12)',
+                boxShadow: '0px 4px 16px rgba(15,23,42,0.06)',
                 zIndex: 1000
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <div style={{ fontSize: '13px', fontWeight: 600, color: '#333' }}>Customer ID Access</div>
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: '#0F172A' }}>Customer ID Access</div>
                   <button
                     onClick={() => setShowCustomerIdAccess(false)}
                     style={{
                       border: 'none',
                       background: 'transparent',
                       cursor: 'pointer',
-                      color: '#666',
+                      color: '#64748B',
                       fontSize: '12px'
                     }}
                   >
@@ -641,7 +700,7 @@ const CustomerDashboard = () => {
                 </div>
 
                 <div style={{ marginBottom: '8px' }}>
-                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#333', marginBottom: '6px' }}>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#0F172A', marginBottom: '6px' }}>
                     tokenID (exact parameter)
                   </label>
                   <input
@@ -668,8 +727,8 @@ const CustomerDashboard = () => {
                     padding: '9px 10px',
                     borderRadius: '6px',
                     border: 'none',
-                    backgroundColor: customerIdAccess.loading ? '#777' : '#1F2937',
-                    color: 'white',
+                    backgroundColor: customerIdAccess.loading ? '#64748B' : '#1E3A8A',
+                    color: '#FFFFFF',
                     fontSize: '12px',
                     cursor: 'pointer',
                     fontWeight: 600
@@ -684,9 +743,9 @@ const CustomerDashboard = () => {
                     padding: '8px 10px',
                     borderRadius: '6px',
                     fontSize: '12px',
-                    backgroundColor: '#FFECEC',
-                    color: '#C62828',
-                    border: '1px solid #F5B5B5'
+                    backgroundColor: '#FEE2E2',
+                    color: '#DC2626',
+                    border: '1px solid #FECACA'
                   }}>
                     {customerIdAccess.error}
                   </div>
@@ -697,7 +756,7 @@ const CustomerDashboard = () => {
                     <div style={{
                       fontSize: '12px',
                       fontWeight: 600,
-                      color: '#444',
+                      color: '#0F172A',
                       marginBottom: '6px'
                     }}>
                       Customer Access Details
@@ -721,16 +780,16 @@ const CustomerDashboard = () => {
 
                       return (
                         <div style={{
-                          backgroundColor: '#F8F8F8',
-                          border: '1px solid #EEE',
+                          backgroundColor: '#F8FAFC',
+                          border: '1px solid #E2E8F0',
                           borderRadius: '8px',
                           padding: '10px'
                         }}>
                           <div style={{ display: 'grid', gap: '10px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
-                              <span style={{ fontSize: '12px', color: '#666', fontWeight: 600 }}>Token ID</span>
+                              <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 600 }}>Token ID</span>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <span style={{ fontSize: '12px', color: '#111', fontFamily: 'monospace', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis' }} title={tokenId}>
+                                <span style={{ fontSize: '12px', color: '#0F172A', fontFamily: 'monospace', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis' }} title={tokenId}>
                                   {tokenId}
                                 </span>
                                 <button
@@ -741,7 +800,7 @@ const CustomerDashboard = () => {
                                     border: '1px solid #E5E5E5',
                                     backgroundColor: '#fff',
                                     fontSize: '11px',
-                                    color: '#555',
+                                    color: '#64748B',
                                     cursor: 'pointer'
                                   }}
                                 >
@@ -751,9 +810,9 @@ const CustomerDashboard = () => {
                             </div>
 
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
-                              <span style={{ fontSize: '12px', color: '#666', fontWeight: 600 }}>Customer ID</span>
+                              <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 600 }}>Customer ID</span>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <span style={{ fontSize: '12px', color: '#111', fontFamily: 'monospace', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis' }} title={customerId}>
+                                <span style={{ fontSize: '12px', color: '#0F172A', fontFamily: 'monospace', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis' }} title={customerId}>
                                   {customerId}
                                 </span>
                                 <button
@@ -764,7 +823,7 @@ const CustomerDashboard = () => {
                                     border: '1px solid #E5E5E5',
                                     backgroundColor: '#fff',
                                     fontSize: '11px',
-                                    color: '#555',
+                                    color: '#64748B',
                                     cursor: 'pointer'
                                   }}
                                 >
@@ -774,7 +833,7 @@ const CustomerDashboard = () => {
                             </div>
 
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
-                              <span style={{ fontSize: '12px', color: '#666', fontWeight: 600 }}>Approved</span>
+                              <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 600 }}>Approved</span>
                               <span
                                 style={{
                                   fontSize: '12px',
@@ -791,7 +850,7 @@ const CustomerDashboard = () => {
                             </div>
 
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
-                              <span style={{ fontSize: '12px', color: '#666', fontWeight: 600 }}>Status</span>
+                              <span style={{ fontSize: '12px', color: '#64748B', fontWeight: 600 }}>Status</span>
                               <span
                                 style={{
                                   fontSize: '12px',
@@ -822,7 +881,7 @@ const CustomerDashboard = () => {
               cursor: 'pointer',
               fontSize: '14px',
               fontWeight: '500',
-              color: '#666',
+              color: '#94A3B8',
               position: 'relative'
             }}
           >
@@ -832,11 +891,11 @@ const CustomerDashboard = () => {
                 position: 'absolute',
                 top: '40px',
                 right: '0',
-                backgroundColor: 'white',
-                border: '1px solid #DDD',
+                backgroundColor: '#FFFFFF',
+                border: '1px solid #E2E8F0',
                 borderRadius: '6px',
                 minWidth: '150px',
-                boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+                boxShadow: '0px 4px 16px rgba(15,23,42,0.06)',
                 zIndex: 1000
               }}>
                 <button
@@ -865,28 +924,38 @@ const CustomerDashboard = () => {
         </div>
 
         {/* Content Area */}
-        <div style={{ flex: 1, padding: '40px 0 40px 0', overflowY: 'auto', backgroundColor: '#fff', minWidth: 0 }}>
+        <div style={{ flex: 1, padding: '32px 0 40px 0', overflowY: 'auto', backgroundColor: '#F8FAFC', minWidth: 0 }}>
           {activeLane === 'wallet' && (
             <div style={{
-              backgroundColor: 'white',
+              backgroundColor: '#FFFFFF',
               borderRadius: '12px',
               padding: '24px',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-              border: '1px solid #EFEFEF'
+              boxShadow: '0px 4px 16px rgba(15,23,42,0.06)',
+              border: '1px solid #E2E8F0',
+              margin: '0 32px'
             }}>
-              <h2 style={{ margin: '0 0 24px 0', fontSize: '24px', fontWeight: '600', color: '#000' }}>Wallet</h2>
+              <h2 style={{ margin: '0 0 4px 0', fontSize: '22px', fontWeight: '600', color: '#0F172A' }}>Customer Wallet</h2>
+              <p style={{ margin: '0 0 20px 0', fontSize: '13px', color: '#64748B' }}>View your Between Network balance and token details.</p>
 
               {wallet.loading ? (
-                <p style={{ margin: '16px 0', fontSize: '14px', color: '#999' }}>Loading...</p>
+                <p style={{ margin: '16px 0', fontSize: '14px', color: '#64748B' }}>Loading wallet details…</p>
               ) : wallet.error ? (
-                <div style={{ padding: '12px', backgroundColor: '#FFE5E5', borderRadius: '8px', color: '#D32F2F', fontSize: '12px', marginTop: '12px' }}>
+                <div style={{ padding: '12px', backgroundColor: '#FEE2E2', borderRadius: '8px', color: '#DC2626', fontSize: '12px', marginTop: '12px', border: '1px solid #FECACA' }}>
                   {wallet.error}
                 </div>
               ) : wallet.data ? (
                 (() => {
                   const walletPayload = resolveWalletPayload(wallet.data);
-                  const currencySymbol = walletPayload?.currencySymbol || walletPayload?.currency_symbol || '$';
-                  const currency = formatCurrency(walletPayload) || 'USD';
+                  const registrationStatus = walletPayload?.registration?.status || '';
+                  const hasAssignedToken = Boolean(walletPayload?.tokenID || walletPayload?.token_id || walletPayload?.token);
+                  const hideCurrency =
+                    !hasAssignedToken ||
+                    registrationStatus === 'not_registered' ||
+                    registrationStatus === 'no_token_assigned' ||
+                    registrationStatus === 'pending_approval' ||
+                    registrationStatus === 'pending';
+                  const currencySymbol = hideCurrency ? '' : (walletPayload?.currencySymbol || walletPayload?.currency_symbol || '');
+                  const currency = hideCurrency ? '' : formatCurrency(walletPayload);
                   const balanceValue = normalizeBalance(formatBalance(walletPayload));
                   const tokenId = walletPayload?.tokenID || walletPayload?.token_id || walletPayload?.token || '—';
                   const statusText = walletPayload?.registration?.status
@@ -907,55 +976,54 @@ const CustomerDashboard = () => {
 
                   return (
                     <>
-                      <div style={{ display: 'grid', gap: '16px' }}>
+                      <div style={{ display: 'grid', gap: '16px', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
                         <div>
-                          <p style={{ margin: '0 0 6px 0', fontSize: '12px', color: '#999', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Balance</p>
-                          <p style={{ margin: '0', fontSize: '32px', fontWeight: '700', color: '#000' }}>
-                            {currencySymbol}{balanceValue} {currency}
+                          <p style={{ margin: '0 0 4px 0', fontSize: '11px', color: '#64748B', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Balance</p>
+                          <p style={{ margin: '0', fontSize: '30px', fontWeight: '700', color: '#0F172A' }}>
+                            {currencySymbol}{balanceValue}{currency ? ` ${currency}` : ''}
                           </p>
                         </div>
                         <div>
-                          <p style={{ margin: '0 0 6px 0', fontSize: '12px', color: '#999', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Token ID</p>
-                          <p style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#000' }}>{tokenId}</p>
+                          <p style={{ margin: '0 0 4px 0', fontSize: '11px', color: '#64748B', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Token ID</p>
+                          <p style={{ margin: 0, fontSize: '15px', fontWeight: '600', color: '#0F172A' }}>{tokenId}</p>
                         </div>
                         <div>
-                          <p style={{ margin: '0 0 6px 0', fontSize: '12px', color: '#999', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Status</p>
-                          <p style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#2E7D32' }}>✅ {statusText}</p>
+                          <p style={{ margin: '0 0 4px 0', fontSize: '11px', color: '#64748B', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Status</p>
+                          <p style={{ margin: 0, fontSize: '14px', fontWeight: '600', color: '#15803D' }}>● {statusText}</p>
                         </div>
                       </div>
 
                       <div style={{
-                        marginTop: '20px',
-                        backgroundColor: '#F7F7F7',
-                        borderRadius: '10px',
-                        padding: '16px',
-                        border: '1px solid #EEE'
+                        marginTop: '24px',
+                        backgroundColor: '#F9FAFB',
+                        borderRadius: '12px',
+                        padding: '16px 18px',
+                        border: '1px solid #E5E7EB'
                       }}>
-                        <p style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#999', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        <p style={{ margin: '0 0 10px 0', fontSize: '11px', color: '#64748B', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                           Account Details
                         </p>
 
                         <div style={{ display: 'grid', gap: '12px' }}>
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Network Address:</div>
+                              <div style={{ fontSize: '12px', color: '#64748B' }}>Network Address</div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <p style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', color: '#111' }}>
+                              <p style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', color: '#0F172A' }}>
                                 {truncateId(networkAddress, 20)}
                               </p>
                               <button
                                 onClick={() => {
                                   if (networkAddress && networkAddress !== '—') {
                                     navigator.clipboard.writeText(networkAddress);
-                                    alert('Network Address copied!');
                                   }
                                 }}
                                 style={{
                                   padding: '4px 8px',
                                   borderRadius: '6px',
-                                  border: '1px solid #E5E5E5',
-                                  backgroundColor: '#fff',
+                                  border: '1px solid #E5E7EB',
+                                  backgroundColor: '#FFFFFF',
                                   fontSize: '11px',
-                                  color: '#555',
+                                  color: '#374151',
                                   cursor: 'pointer'
                                 }}
                               >
@@ -965,25 +1033,24 @@ const CustomerDashboard = () => {
                           </div>
 
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Token Transfer ID:</div>
+                            <div style={{ fontSize: '12px', color: '#64748B' }}>Token Transfer ID</div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <p style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', color: '#111' }}>
+                              <p style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', color: '#0F172A' }}>
                                 {truncateId(tokenTransferId, 24)}
                               </p>
                               <button
                                 onClick={() => {
                                   if (tokenTransferId && tokenTransferId !== '—') {
                                     navigator.clipboard.writeText(tokenTransferId);
-                                    alert('Token Transfer ID copied!');
                                   }
                                 }}
                                 style={{
                                   padding: '4px 8px',
                                   borderRadius: '6px',
-                                  border: '1px solid #E5E5E5',
-                                  backgroundColor: '#fff',
+                                  border: '1px solid #E5E7EB',
+                                  backgroundColor: '#FFFFFF',
                                   fontSize: '11px',
-                                  color: '#555',
+                                  color: '#374151',
                                   cursor: 'pointer'
                                 }}
                               >
@@ -993,8 +1060,8 @@ const CustomerDashboard = () => {
                           </div>
 
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-                            <div style={{ fontSize: '12px', color: '#666' }}>Registered On:</div>
-                            <div style={{ fontSize: '12px', color: '#111' }}>{registeredOn}</div>
+                            <div style={{ fontSize: '12px', color: '#64748B' }}>Registered On</div>
+                            <div style={{ fontSize: '12px', color: '#0F172A' }}>{registeredOn}</div>
                           </div>
                         </div>
                       </div>
@@ -1003,46 +1070,23 @@ const CustomerDashboard = () => {
                 })()
               ) : null}
 
-              <div style={{ marginTop: '24px', paddingTop: '24px', borderTop: '1px solid #EFEFEF' }}>
-                <p style={{ margin: '0 0 16px 0', fontSize: '14px', fontWeight: '600', color: '#000' }}>Recent Activity</p>
-                {history.loading ? (
-                  <p style={{ fontSize: '12px', color: '#999' }}>Loading...</p>
-                ) : history.data.transactions.length > 0 ? (
-                  <div>
-                    {history.data.transactions.slice(0, 3).map((tx, idx) => (
-                      <div key={idx} style={{
-                        padding: '12px 0',
-                        borderBottom: idx < history.data.transactions.length - 1 ? '1px solid #F0F0F0' : 'none',
-                        fontSize: '12px'
-                      }}>
-                        <p style={{ margin: '0', color: '#333', fontWeight: '500' }}>
-                          {tx.transaction_type === 'DEBIT' ? 'Sent' : 'Received'} ${tx.amount}
-                        </p>
-                        <p style={{ margin: '2px 0 0 0', color: '#999', fontSize: '11px' }}>
-                          {tx.timestamp ? new Date(tx.timestamp).toLocaleDateString() : 'N/A'}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p style={{ fontSize: '12px', color: '#999' }}>No transactions yet</p>
-                )}
-              </div>
             </div>
           )}
 
           {activeLane === 'send' && (
             <div style={{
-              backgroundColor: 'white',
+              backgroundColor: '#FFFFFF',
               borderRadius: '12px',
               padding: '24px',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-              border: '1px solid #EFEFEF'
+              boxShadow: '0px 4px 16px rgba(15,23,42,0.06)',
+              border: '1px solid #E2E8F0',
+              margin: '0 32px'
             }}>
-              <h2 style={{ margin: '0 0 24px 0', fontSize: '24px', fontWeight: '600', color: '#000' }}>Send Money</h2>
+              <h2 style={{ margin: '0 0 4px 0', fontSize: '22px', fontWeight: '600', color: '#0F172A' }}>Send money</h2>
+              <p style={{ margin: '0 0 20px 0', fontSize: '13px', color: '#64748B' }}>Move value to another customer across borders.</p>
 
               <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#333', marginBottom: '8px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#0F172A', marginBottom: '8px' }}>
                   Receiver Customer Network Address
                 </label>
                 <input
@@ -1053,10 +1097,10 @@ const CustomerDashboard = () => {
                   style={{
                     width: '100%',
                     padding: '10px',
-                    border: '1px solid #DDD',
+                    border: '1px solid #D1D5DB',
                     borderRadius: '6px',
                     fontSize: '14px',
-                    color: '#333',
+                    color: '#0F172A',
                     fontFamily: 'inherit',
                     boxSizing: 'border-box'
                   }}
@@ -1070,7 +1114,7 @@ const CustomerDashboard = () => {
                 marginBottom: '16px'
               }}>
                 <div>
-                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#333', marginBottom: '8px' }}>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#0F172A', marginBottom: '8px' }}>
                     Sender Token ID
                   </label>
                   <input
@@ -1081,7 +1125,7 @@ const CustomerDashboard = () => {
                     style={{
                       width: '100%',
                       padding: '10px',
-                      border: '1px solid #DDD',
+                      border: '1px solid #D1D5DB',
                       borderRadius: '6px',
                       fontSize: '14px',
                       boxSizing: 'border-box'
@@ -1089,7 +1133,7 @@ const CustomerDashboard = () => {
                   />
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#333', marginBottom: '8px' }}>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#0F172A', marginBottom: '8px' }}>
                     Receiver Token ID
                   </label>
                   <input
@@ -1118,7 +1162,7 @@ const CustomerDashboard = () => {
               </div>
 
               <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#333', marginBottom: '8px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#0F172A', marginBottom: '8px' }}>
                   Amount
                 </label>
                 <input
@@ -1129,7 +1173,7 @@ const CustomerDashboard = () => {
                   style={{
                     width: '100%',
                     padding: '10px',
-                    border: '1px solid #DDD',
+                    border: '1px solid #D1D5DB',
                     borderRadius: '6px',
                     fontSize: '14px',
                     boxSizing: 'border-box'
@@ -1143,9 +1187,9 @@ const CustomerDashboard = () => {
                   borderRadius: '6px',
                   fontSize: '12px',
                   marginBottom: '16px',
-                  backgroundColor: sendStatus.state === 'error' ? '#FFECEC' : '#E9F7EF',
-                  color: sendStatus.state === 'error' ? '#C62828' : '#2E7D32',
-                  border: `1px solid ${sendStatus.state === 'error' ? '#F5B5B5' : '#B7E4C7'}`
+                  backgroundColor: sendStatus.state === 'error' ? '#FEE2E2' : '#ECFDF3',
+                  color: sendStatus.state === 'error' ? '#DC2626' : '#15803D',
+                  border: `1px solid ${sendStatus.state === 'error' ? '#FECACA' : '#BBF7D0'}`
                 }}>
                   {sendStatus.message}
                 </div>
@@ -1157,20 +1201,20 @@ const CustomerDashboard = () => {
                 style={{
                   width: '100%',
                   padding: '12px',
-                  backgroundColor: sendStatus.state === 'loading' ? '#777' : '#333',
-                  color: 'white',
+                  backgroundColor: sendStatus.state === 'loading' ? '#64748B' : '#1E3A8A',
+                  color: '#FFFFFF',
                   border: 'none',
                   borderRadius: '6px',
                   fontSize: '14px',
                   fontWeight: '600',
-                  cursor: 'pointer',
-                  transition: 'background-color 0.3s'
+                  cursor: sendStatus.state === 'loading' ? 'default' : 'pointer',
+                  transition: 'background-color 0.2s ease-out'
                 }}
-                onMouseOver={(e) => {
-                  if (sendStatus.state !== 'loading') e.target.style.backgroundColor = '#555';
+                onMouseOver={e => {
+                  if (sendStatus.state !== 'loading') e.target.style.backgroundColor = '#1E40AF';
                 }}
-                onMouseOut={(e) => {
-                  if (sendStatus.state !== 'loading') e.target.style.backgroundColor = '#333';
+                onMouseOut={e => {
+                  if (sendStatus.state !== 'loading') e.target.style.backgroundColor = '#1E3A8A';
                 }}
               >
                 {sendStatus.state === 'loading' ? 'Sending...' : 'Send'}
@@ -1180,17 +1224,19 @@ const CustomerDashboard = () => {
 
           {activeLane === 'add' && (
             <div style={{
-              backgroundColor: 'white',
+              backgroundColor: '#FFFFFF',
               borderRadius: '12px',
               padding: '24px',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-              border: '1px solid #EFEFEF',
-              maxWidth: '700px'
+              boxShadow: '0px 4px 16px rgba(15,23,42,0.06)',
+              border: '1px solid #E2E8F0',
+              maxWidth: '700px',
+              margin: '0 32px'
             }}>
-              <h2 style={{ margin: '0 0 24px 0', fontSize: '24px', fontWeight: '600', color: '#000' }}>Add Funds</h2>
+              <h2 style={{ margin: '0 0 4px 0', fontSize: '22px', fontWeight: '600', color: '#0F172A' }}>Add funds</h2>
+              <p style={{ margin: '0 0 20px 0', fontSize: '13px', color: '#64748B' }}>Request additional balance into your wallet token.</p>
 
               <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#333', marginBottom: '8px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#0F172A', marginBottom: '8px' }}>
                   Amount
                 </label>
                 <input
@@ -1201,7 +1247,7 @@ const CustomerDashboard = () => {
                   style={{
                     width: '100%',
                     padding: '10px',
-                    border: '1px solid #DDD',
+                    border: '1px solid #D1D5DB',
                     borderRadius: '6px',
                     fontSize: '14px',
                     boxSizing: 'border-box'
@@ -1215,9 +1261,9 @@ const CustomerDashboard = () => {
                   borderRadius: '6px',
                   marginBottom: '16px',
                   fontSize: '12px',
-                  backgroundColor: addFundsStatus.state === 'error' ? '#FFECEC' : '#E9F7EF',
-                  color: addFundsStatus.state === 'error' ? '#C62828' : '#2E7D32',
-                  border: `1px solid ${addFundsStatus.state === 'error' ? '#F5B5B5' : '#B7E4C7'}`
+                  backgroundColor: addFundsStatus.state === 'error' ? '#FEE2E2' : '#ECFDF3',
+                  color: addFundsStatus.state === 'error' ? '#DC2626' : '#15803D',
+                  border: `1px solid ${addFundsStatus.state === 'error' ? '#FECACA' : '#BBF7D0'}`
                 }}>
                   {addFundsStatus.message}
                 </div>
@@ -1229,20 +1275,20 @@ const CustomerDashboard = () => {
                 style={{
                   width: '100%',
                   padding: '12px',
-                  backgroundColor: addFundsStatus.state === 'loading' ? '#777' : '#333',
-                  color: 'white',
+                  backgroundColor: addFundsStatus.state === 'loading' ? '#64748B' : '#1E3A8A',
+                  color: '#FFFFFF',
                   border: 'none',
                   borderRadius: '6px',
                   fontSize: '14px',
                   fontWeight: '600',
-                  cursor: 'pointer',
-                  transition: 'background-color 0.3s'
+                  cursor: addFundsStatus.state === 'loading' ? 'default' : 'pointer',
+                  transition: 'background-color 0.2s ease-out'
                 }}
-                onMouseOver={(e) => {
-                  if (addFundsStatus.state !== 'loading') e.target.style.backgroundColor = '#555';
+                onMouseOver={e => {
+                  if (addFundsStatus.state !== 'loading') e.target.style.backgroundColor = '#1E40AF';
                 }}
-                onMouseOut={(e) => {
-                  if (addFundsStatus.state !== 'loading') e.target.style.backgroundColor = '#333';
+                onMouseOut={e => {
+                  if (addFundsStatus.state !== 'loading') e.target.style.backgroundColor = '#1E3A8A';
                 }}
               >
                 {addFundsStatus.state === 'loading' ? 'Submitting...' : 'Add Funds'}
@@ -1252,11 +1298,12 @@ const CustomerDashboard = () => {
 
           {activeLane === 'history' && (
             <div style={{
-              backgroundColor: 'white',
+              backgroundColor: '#FFFFFF',
               borderRadius: '12px',
               padding: '24px',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-              border: '1px solid #EFEFEF'
+              boxShadow: '0px 4px 16px rgba(15,23,42,0.06)',
+              border: '1px solid #E2E8F0',
+              margin: '0 32px'
             }}>
               {(() => {
                 const baseTransactions = Array.isArray(history?.data?.transactions) ? history.data.transactions : [];
@@ -1290,7 +1337,7 @@ const CustomerDashboard = () => {
                 return (
                   <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-                <h2 style={{ margin: 0, fontSize: '24px', fontWeight: '600', color: '#000' }}>History</h2>
+                <h2 style={{ margin: 0, fontSize: '22px', fontWeight: '600', color: '#0F172A' }}>Activity history</h2>
                 <div style={{ display: 'flex', gap: '8px' }}>
                   {[
                     { key: 'all', label: 'All' },
@@ -1307,8 +1354,8 @@ const CustomerDashboard = () => {
                       style={{
                         padding: '6px 12px',
                         border: 'none',
-                        backgroundColor: historyTab === tab.key ? '#5B7FD6' : '#F5F5F7',
-                        color: historyTab === tab.key ? 'white' : '#333',
+                        backgroundColor: historyTab === tab.key ? '#1E3A8A' : '#E2E8F0',
+                        color: historyTab === tab.key ? '#FFFFFF' : '#0F172A',
                         borderRadius: '6px',
                         fontSize: '12px',
                         fontWeight: '600',
@@ -1327,9 +1374,9 @@ const CustomerDashboard = () => {
                   padding: '10px 12px',
                   borderRadius: '6px',
                   fontSize: '12px',
-                  backgroundColor: '#FFECEC',
-                  color: '#C62828',
-                  border: '1px solid #F5B5B5'
+                  backgroundColor: '#FEE2E2',
+                  color: '#DC2626',
+                  border: '1px solid #FECACA'
                 }}>
                   {mintHistory.error}
                 </div>
@@ -1344,45 +1391,65 @@ const CustomerDashboard = () => {
                   fontSize: '13px'
                 }}>
                   <thead>
-                    <tr style={{ borderBottom: '2px solid #F0F0F0' }}>
-                      <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#333' }}>Date</th>
-                      <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#333' }}>Type</th>
-                      <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#333' }}>Amount</th>
-                      <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#333' }}>Status</th>
-                      <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', color: '#333' }}>Details</th>
+                    <tr style={{ borderBottom: '2px solid #E2E8F0', backgroundColor: '#F8FAFC' }}>
+                      <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: '#0F172A', fontSize: '12px' }}>Date</th>
+                      <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: '#0F172A', fontSize: '12px' }}>Type</th>
+                      <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: '#0F172A', fontSize: '12px' }}>Amount</th>
+                      <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: '#0F172A', fontSize: '12px' }}>Status</th>
+                      <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: '#0F172A', fontSize: '12px' }}>Details</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {displayedRows.slice(0, 5).map((tx, idx) => (
-                      <tr key={idx} style={{ borderBottom: '1px solid #F0F0F0' }}>
-                        <td style={{ padding: '12px', color: '#333' }}>
+                    {displayedRows.slice(0, 5).map((tx, idx) => {
+                      const normalizedStatus = String(tx.status || '').trim().toUpperCase();
+                      const isSuccessStatus = ['COMPLETED', 'APPROVED', 'SUCCESS', 'DONE'].includes(normalizedStatus);
+                      return (
+                      <tr key={idx} style={{ borderBottom: '1px solid #E5E7EB' }}>
+                        <td style={{ padding: '10px 12px', color: '#0F172A' }}>
                           {tx.timestamp ? new Date(tx.timestamp).toLocaleDateString() : 'N/A'}
                         </td>
-                        <td style={{ padding: '12px', color: '#333' }}>
+                        <td style={{ padding: '10px 12px', color: '#0F172A' }}>
                           {(tx.transaction_type || '').toUpperCase() === 'DEBIT'
                             ? 'Sent'
                             : (historyTab === 'mintrequest' ? 'Mint Request' : 'Received')}
                         </td>
-                        <td style={{ padding: '12px', color: '#333', fontWeight: '600' }}>
+                        <td style={{ padding: '10px 12px', color: '#0F172A', fontWeight: '600' }}>
                           ${tx.amount}
                         </td>
-                        <td style={{ padding: '12px' }}>
+                        <td style={{ padding: '10px 12px' }}>
                           <span style={{
-                            padding: '4px 8px',
-                            backgroundColor: tx.status === 'Completed' || tx.status === 'completed' ? '#E8F5E9' : '#FFF3CD',
-                            color: tx.status === 'Completed' || tx.status === 'completed' ? '#2E7D32' : '#856404',
-                            borderRadius: '4px',
+                            padding: '3px 8px',
+                            backgroundColor: isSuccessStatus ? '#ECFDF3' : '#FEF3C7',
+                            color: isSuccessStatus ? '#15803D' : '#92400E',
+                            borderRadius: '999px',
                             fontSize: '11px',
-                            fontWeight: '600'
+                            fontWeight: '600',
+                            border: `1px solid ${isSuccessStatus ? '#BBF7D0' : '#FDE68A'}`
                           }}>
                             {tx.status || 'Completed'}
                           </span>
+                          {tx.transaction_category === 'TRANSFER' && (
+                            <div style={{ marginTop: '6px', fontSize: '10px', color: '#666', lineHeight: 1.4 }}>
+                              <div>
+                                Sender Bank:{' '}
+                                <span style={{ fontWeight: 700, color: tx.approved_by_sender_owner ? '#2E7D32' : '#C62828' }}>
+                                  {tx.approved_by_sender_owner ? 'TRUE' : 'FALSE'}
+                                </span>
+                              </div>
+                              <div>
+                                Receiver Bank:{' '}
+                                <span style={{ fontWeight: 700, color: tx.approved_by_receiver_owner ? '#2E7D32' : '#C62828' }}>
+                                  {tx.approved_by_receiver_owner ? 'TRUE' : 'FALSE'}
+                                </span>
+                              </div>
+                            </div>
+                          )}
                         </td>
-                        <td style={{ padding: '12px' }}>
+                        <td style={{ padding: '10px 12px' }}>
                           <button style={{
                             backgroundColor: 'transparent',
                             border: 'none',
-                            color: '#5B7FD6',
+                            color: '#1E3A8A',
                             cursor: 'pointer',
                             fontSize: '12px',
                             fontWeight: '600'
@@ -1393,7 +1460,8 @@ const CustomerDashboard = () => {
                           </button>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1403,11 +1471,11 @@ const CustomerDashboard = () => {
                   marginTop: '16px',
                   padding: '12px',
                   borderRadius: '8px',
-                  border: '1px solid #EEE',
-                  backgroundColor: '#F7F7F7'
+                  border: '1px solid #E5E7EB',
+                  backgroundColor: '#F9FAFB'
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                    <p style={{ margin: 0, fontSize: '12px', fontWeight: '600', color: '#333' }}>
+                    <p style={{ margin: 0, fontSize: '12px', fontWeight: '600', color: '#0F172A' }}>
                       Transaction Details (Backend)
                     </p>
                     <button
@@ -1415,7 +1483,7 @@ const CustomerDashboard = () => {
                       style={{
                         backgroundColor: 'transparent',
                         border: 'none',
-                        color: '#999',
+                        color: '#9CA3AF',
                         cursor: 'pointer',
                         fontSize: '12px',
                         fontWeight: '600'
@@ -1427,11 +1495,11 @@ const CustomerDashboard = () => {
                   <pre style={{
                     margin: 0,
                     padding: '12px',
-                    backgroundColor: '#fff',
-                    border: '1px solid #EEE',
+                    backgroundColor: '#FFFFFF',
+                    border: '1px solid #E5E7EB',
                     borderRadius: '6px',
                     fontSize: '12px',
-                    color: '#333',
+                    color: '#374151',
                     whiteSpace: 'pre-wrap',
                     wordBreak: 'break-word'
                   }}>
@@ -1441,7 +1509,7 @@ const CustomerDashboard = () => {
               )}
 
               {displayedRows.length === 0 && (
-                <p style={{ textAlign: 'center', padding: '20px', color: '#999', fontSize: '12px' }}>
+                <p style={{ textAlign: 'center', padding: '20px', color: '#64748B', fontSize: '12px' }}>
                   {historyTab === 'mintrequest' ? 'No mint requests yet' : 'No transactions yet'}
                 </p>
               )}

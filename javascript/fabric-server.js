@@ -987,6 +987,42 @@ function getBankCallerContext(req) {
     return { userId, ownerNetworkAddress };
 }
 
+async function getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress) {
+    if (!walletPath || !userId || !ownerNetworkAddress) {
+        return [];
+    }
+
+    try {
+        const strictAssigned = await queryChaincode(
+            walletPath,
+            userId,
+            'mychannel',
+            'fabcar',
+            'ListAssignedTokensByOwner',
+            [ownerNetworkAddress]
+        );
+        const strictTokens = Array.isArray(strictAssigned)
+            ? strictAssigned
+            : (strictAssigned ? [strictAssigned] : []);
+        if (strictTokens.length > 0) {
+            return strictTokens;
+        }
+    } catch (strictErr) {
+        console.warn(`strict owner token lookup failed for ${userId}:`, strictErr?.message || strictErr);
+    }
+
+    // Backward-compatible fallback for older chaincode versions.
+    try {
+        const assigned = await listAssignedTokens(walletPath, userId);
+        return (Array.isArray(assigned) ? assigned : []).filter(
+            token => (token.owner || token.Owner) === ownerNetworkAddress
+        );
+    } catch (fallbackErr) {
+        console.warn(`fallback owner token lookup failed for ${userId}:`, fallbackErr?.message || fallbackErr);
+        return [];
+    }
+}
+
 async function ensureTokenPoolInitialized(walletPath) {
     try {
         const tokens = await viewAllTokens(walletPath, 'admin');
@@ -2209,9 +2245,9 @@ app.get('/api/customer/wallet', async (req, res) => {
                 success: true,
                 wallet: {
                     wallet_balance: 0,
-                    wallet_balance_display: '$0.00',
+                    wallet_balance_display: '0.00',
                     currency: null,
-                    currency_symbol: '$',
+                    currency_symbol: '',
                     token: null,
                     registration: {
                         status: 'no_token_assigned',
@@ -2251,9 +2287,9 @@ app.get('/api/customer/wallet', async (req, res) => {
                     success: true,
                     wallet: {
                         wallet_balance: 0,
-                        wallet_balance_display: '$0.00',
+                        wallet_balance_display: '0.00',
                         currency: null,
-                        currency_symbol: '$',
+                        currency_symbol: '',
                         token: null,
                         registration: {
                             status: 'not_registered',
@@ -2270,9 +2306,9 @@ app.get('/api/customer/wallet', async (req, res) => {
                     success: true,
                     wallet: {
                         wallet_balance: 0,
-                        wallet_balance_display: '$0.00',
+                        wallet_balance_display: '0.00',
                         currency: null,
-                        currency_symbol: '$',
+                        currency_symbol: '',
                         token: null,
                         registration: {
                             status: 'no_token_assigned',
@@ -3708,9 +3744,9 @@ app.get('/api/bank/wallet', authenticateJWT, async (req, res) => {
             res.json({
                 wallet: {
                     wallet_balance: 0,
-                    wallet_balance_display: '$0.00',
+                    wallet_balance_display: '0.00',
                     currency: null,
-                    currency_symbol: '$',
+                    currency_symbol: '',
                     token: null,
                     registration: {
                         status: 'not_registered',
@@ -3790,9 +3826,9 @@ app.get('/api/bank/wallet', authenticateJWT, async (req, res) => {
                     return res.json({
                         wallet: {
                             wallet_balance: 0,
-                            wallet_balance_display: '$0.00',
+                            wallet_balance_display: '0.00',
                             currency: null,
-                            currency_symbol: '$',
+                            currency_symbol: '',
                             token: null,
                             registration: {
                                 status: 'not_registered',
@@ -3808,9 +3844,9 @@ app.get('/api/bank/wallet', authenticateJWT, async (req, res) => {
                 return res.json({
                     wallet: {
                         wallet_balance: 0,
-                        wallet_balance_display: '$0.00',
+                        wallet_balance_display: '0.00',
                         currency: null,
-                        currency_symbol: '$',
+                        currency_symbol: '',
                         token: null,
                         registration: {
                             status: 'not_registered',
@@ -3894,9 +3930,9 @@ app.get('/api/bank/wallet', authenticateJWT, async (req, res) => {
                 return res.json({
                     wallet: {
                         wallet_balance: 0,
-                        wallet_balance_display: '$0.00',
+                        wallet_balance_display: '0.00',
                         currency: null,
-                        currency_symbol: '$',
+                        currency_symbol: '',
                         token: null,
                         registration: {
                             status: 'pending_approval',
@@ -3911,9 +3947,9 @@ app.get('/api/bank/wallet', authenticateJWT, async (req, res) => {
                 return res.json({
                     wallet: {
                         wallet_balance: 0,
-                        wallet_balance_display: '$0.00',
+                        wallet_balance_display: '0.00',
                         currency: null,
-                        currency_symbol: '$',
+                        currency_symbol: '',
                         token: null,
                         registration: {
                             status: 'no_token_assigned',
@@ -4027,7 +4063,7 @@ app.post('/api/bank/get-token-access', authenticateJWT, async (req, res) => {
 });
 
 // Get pending customer registrations
-app.get('/api/bank/customer-registrations/pending', async (req, res) => {
+app.get('/api/bank/customer-registrations/pending', authenticateJWT, async (req, res) => {
     try {
         // Accept both camelCase and snake_case parameters
         let tokenID = req.query.tokenID || req.query.tokenId;
@@ -4045,27 +4081,11 @@ app.get('/api/bank/customer-registrations/pending', async (req, res) => {
         // Derive tokenID from assigned tokens if not provided
         if (!tokenID && userId) {
             try {
-                const assigned = await listAssignedTokens(walletPath, userId);
-                if (Array.isArray(assigned) && assigned.length > 0) {
-                    const normalizeOwner = token =>
-                        token.owner ||
-                        token.Owner ||
-                        token.owner_network_address ||
-                        token.ownerNetworkAddress ||
-                        null;
-                    const normalizeTokenId = token =>
-                        token.TokenID || token.tokenID || token.token_id || token.tokenId || null;
-
-                    const ownedTokens = assigned.filter(token => normalizeOwner(token) === ownerNetworkAddress);
-                    const selected = ownedTokens[0] || assigned.find(token => Boolean(normalizeTokenId(token)));
-
-                    if (selected) {
-                        tokenID = normalizeTokenId(selected) || tokenID;
-                        console.log('Derived tokenID from assigned tokens:', {
-                            tokenID,
-                            ownerMatch: normalizeOwner(selected) === ownerNetworkAddress
-                        });
-                    }
+                const strictOwnedTokens = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
+                if (Array.isArray(strictOwnedTokens) && strictOwnedTokens.length > 0) {
+                    const selected = strictOwnedTokens[0];
+                    tokenID = selected.TokenID || selected.tokenID || selected.token_id || selected.tokenId || tokenID;
+                    console.log('Derived tokenID from strict owner tokens:', { tokenID, ownerNetworkAddress });
                 }
             } catch (deriveErr) {
                 console.log('Could not derive tokenID from assigned tokens:', deriveErr.message);
@@ -4187,7 +4207,7 @@ app.get('/api/bank/customer-registrations/pending', async (req, res) => {
 });
 
 // List approved customer registrations for a token owner
-app.get('/api/bank/customer-registrations/approved', async (req, res) => {
+app.get('/api/bank/customer-registrations/approved', authenticateJWT, async (req, res) => {
     try {
         const tokenID = req.query.tokenID || req.query.tokenId;
         let ownerNetworkAddress;
@@ -4767,12 +4787,12 @@ app.get('/api/bank/view-all-tokens', async (req, res) => {
     }
 });
 
-// List assigned tokens (admin)
-app.get('/api/bank/assigned-tokens', async (req, res) => {
+// List assigned tokens for the authenticated bank owner only
+app.get('/api/bank/assigned-tokens', authenticateJWT, async (req, res) => {
     try {
-        const { userId = 'admin' } = req.query;
+        const { userId, ownerNetworkAddress } = getBankCallerContext(req);
         const walletPath = path.join(process.cwd(), 'wallet');
-        const assigned = await listAssignedTokens(walletPath, userId);
+        const assigned = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
         res.json(Array.isArray(assigned) ? assigned : []);
     } catch (error) {
         console.error('List assigned tokens error:', error);
@@ -4783,25 +4803,16 @@ app.get('/api/bank/assigned-tokens', async (req, res) => {
     }
 });
 
-// List tokens owned by a specific network address
-app.get('/api/bank/tokens/owned', async (req, res) => {
+// List tokens owned by the authenticated bank owner
+app.get('/api/bank/tokens/owned', authenticateJWT, async (req, res) => {
     try {
-        const { ownerNetworkAddress, userId = 'admin' } = req.query;
-        if (!ownerNetworkAddress) {
-            return res.status(400).json({
-                success: false,
-                error: 'ownerNetworkAddress is required'
-            });
-        }
+        const { ownerNetworkAddress, userId } = getBankCallerContext(req);
         const walletPath = path.join(process.cwd(), 'wallet');
-        const assigned = await listAssignedTokens(walletPath, userId);
-        const tokens = (Array.isArray(assigned) ? assigned : []).filter(
-            token => token.owner === ownerNetworkAddress
-        );
+        const tokens = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
         res.json({
             success: true,
             owner: ownerNetworkAddress,
-            count: tokens.length,
+            count: Array.isArray(tokens) ? tokens.length : 0,
             tokens
         });
     } catch (error) {
@@ -4815,7 +4826,7 @@ app.get('/api/bank/tokens/owned', async (req, res) => {
 });
 
 // List approved participants (use approved customer mint requests to surface participant names/kyc)
-app.get('/api/bank/participants/approved', async (req, res) => {
+app.get('/api/bank/participants/approved', authenticateJWT, async (req, res) => {
     try {
         const extractCN = id => {
             if (!id || typeof id !== 'string') return '';
@@ -4828,14 +4839,7 @@ app.get('/api/bank/participants/approved', async (req, res) => {
         const { networkAddress } = req.query;
         const walletPath = path.join(process.cwd(), 'wallet');
 
-        // Resolve caller; if it fails, default to admin
-        let ownerNetworkAddress = null;
-        let userId = 'admin';
-        try {
-            ({ ownerNetworkAddress, userId } = getBankCallerContext(req));
-        } catch (ctxErr) {
-            console.warn('Approved participants: caller context failed, using admin:', ctxErr?.message || ctxErr);
-        }
+        const { ownerNetworkAddress, userId } = getBankCallerContext(req);
 
         const merged = [];
         // Primary source: approved mint requests (caller then admin) – matches the data that includes participant names
@@ -4936,30 +4940,42 @@ app.get('/api/bank/participants/approved', async (req, res) => {
         const cleaned = deduped.map(({ _mintNamePreferred, ...rest }) => rest);
 
         // ============================================
-        // AUTHORIZATION: Filter by token ownership
+        // AUTHORIZATION: Strict owner-token filtering
         // ============================================
-        // Get caller's owned tokens to determine what they can see
-        let callerOwnedTokens = [];
-        if (userId && userId !== 'admin') {
-            try {
-                const tokens = await listAssignedTokens(walletPath, userId);
-                if (Array.isArray(tokens)) {
-                    callerOwnedTokens = tokens.map(t => t.token_id || t.tokenID || t.tokenId);
-                    console.log(`Approved participants: Caller ${userId} owns tokens:`, callerOwnedTokens);
-                }
-            } catch (tokenErr) {
-                console.warn(`Approved participants: Failed to get caller's owned tokens:`, tokenErr?.message || tokenErr);
-            }
+        // Scope data to tokens that are owned by THIS exact ownerNetworkAddress.
+        let ownerTokenIds = [];
+        if (userId && userId !== 'admin' && ownerNetworkAddress) {
+            const strictOwnedTokens = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
+            ownerTokenIds = (Array.isArray(strictOwnedTokens) ? strictOwnedTokens : [])
+                .map(t => t.token_id || t.tokenID || t.tokenId)
+                .filter(Boolean);
+            console.log(`Approved participants: strict owner tokens for ${userId}:`, ownerTokenIds);
         }
 
-        // If caller is not admin and owns tokens, filter to ONLY show their own token's customers
+        // Optional explicit token scope from UI query param.
+        const requestedTokenID = (req.query.tokenID || req.query.tokenId || '').trim();
+
         let filtered = cleaned;
-        if (userId !== 'admin' && callerOwnedTokens.length > 0) {
-            const beforeCount = cleaned.length;
-            filtered = cleaned.filter(c => callerOwnedTokens.includes(c.token_id));
-            console.log(`Approved participants: Authorization filtered ${beforeCount} → ${filtered.length} (only ${userId}'s tokens)`);
-        } else if (userId === 'admin') {
+        if (userId !== 'admin') {
+            if (ownerTokenIds.length > 0) {
+                const beforeCount = filtered.length;
+                filtered = filtered.filter(c => ownerTokenIds.includes(c.token_id));
+                console.log(`Approved participants: owner filtered ${beforeCount} → ${filtered.length}`);
+            } else {
+                // Non-admin without resolvable owned tokens must not see cross-token data.
+                filtered = [];
+            }
+
+            if (requestedTokenID) {
+                const beforeTokenScope = filtered.length;
+                filtered = filtered.filter(c => c.token_id === requestedTokenID);
+                console.log(`Approved participants: token scoped ${beforeTokenScope} → ${filtered.length} for token ${requestedTokenID}`);
+            }
+        } else {
             console.log(`Approved participants: Admin ${userId} can view all tokens`);
+            if (requestedTokenID) {
+                filtered = filtered.filter(c => c.token_id === requestedTokenID);
+            }
         }
         
         console.log(`Approved participants: After authorization - merged.length=${merged.length}, deduped.length=${deduped.length}, cleaned.length=${cleaned.length}, filtered.length=${filtered.length}`);
@@ -4976,7 +4992,7 @@ app.get('/api/bank/participants/approved', async (req, res) => {
 });
 
 // Approved participant mint requests - filtered to the caller's token ownership
-app.get('/api/participant-mint-requests/approved', async (req, res) => {
+app.get('/api/participant-mint-requests/approved', authenticateJWT, async (req, res) => {
     try {
         let ownerNetworkAddress;
         let userId;
@@ -4991,38 +5007,21 @@ app.get('/api/participant-mint-requests/approved', async (req, res) => {
 
         const walletPath = path.join(process.cwd(), 'wallet');
 
-        // Build token -> owner map to filter requests (using assigned tokens; fallback to admin)
-        let tokenOwnerMap = new Map();
-        const collectTokens = async (label, caller) => {
-            try {
-                const tokens = await listAssignedTokens(walletPath, caller);
-                if (Array.isArray(tokens)) {
-                    tokens.forEach(t => {
-                        const tokenId = t.token_id || t.tokenID || t.tokenId || t.TokenID;
-                        const owner = t.owner || t.Owner;
-                        if (tokenId && owner) {
-                            tokenOwnerMap.set(tokenId, owner);
-                        }
-                    });
-                    console.log(`participant-mint-requests/approved: mapped ${tokenOwnerMap.size} tokens via ${label}`);
-                }
-            } catch (tokenErr) {
-                console.warn(`participant-mint-requests/approved: unable to build token map via ${label}:`, tokenErr?.message || tokenErr);
-            }
-        };
-        await collectTokens('caller', userId);
-        if (!tokenOwnerMap.size) {
-            await collectTokens('admin', 'admin');
-        }
+        const ownerTokens = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
+        const ownerTokenIds = new Set(
+            (Array.isArray(ownerTokens) ? ownerTokens : [])
+                .map(t => t.token_id || t.tokenID || t.tokenId || t.TokenID)
+                .filter(Boolean)
+        );
+        console.log(`participant-mint-requests/approved: strict owner token count=${ownerTokenIds.size}`);
 
         const approved = await listApprovedParticipantMintRequests(walletPath, userId);
         const normalized = Array.isArray(approved)
             ? approved
                 .filter(req => {
                     const tokenId = req.token_id || req.tokenID || req.TokenID || req.tokenId;
-                    if (!tokenId) return false;
-                    const owner = tokenOwnerMap.get(tokenId);
-                    return owner ? owner === ownerNetworkAddress : true; // if map missing, keep for compatibility
+                    if (!tokenId || ownerTokenIds.size === 0) return false;
+                    return ownerTokenIds.has(tokenId);
                 })
                 .map(req => ({
                     ...req,
@@ -6205,18 +6204,27 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
                 );
 
                 // Map transfers to transaction format
-                const mappedTransfers = (Array.isArray(transferHistory) ? transferHistory : []).map(transfer => {
-                    const isSender = transfer.SenderCustomerID === customerNetworkAddress || transfer.sender_customer_id === customerNetworkAddress;
-                    const isReceiver = transfer.ReceiverCustomerID === customerNetworkAddress || transfer.receiver_customer_id === customerNetworkAddress;
-                    const grossAmount = transfer.Amount || transfer.amount || 0;
-                    const commissionAmount = transfer.CommissionAmount || transfer.commission_amount || 0;
-                    const netReceived = isReceiver ? (grossAmount - commissionAmount) : grossAmount;
-                    const completedAt = transfer.CompletedAt || transfer.completed_at || '';
+	                const mappedTransfers = (Array.isArray(transferHistory) ? transferHistory : []).map(transfer => {
+	                    const isSender = transfer.SenderCustomerID === customerNetworkAddress || transfer.sender_customer_id === customerNetworkAddress;
+	                    const isReceiver = transfer.ReceiverCustomerID === customerNetworkAddress || transfer.receiver_customer_id === customerNetworkAddress;
+	                    const grossAmount = transfer.Amount || transfer.amount || 0;
+	                    const commissionAmount = transfer.CommissionAmount || transfer.commission_amount || 0;
+	                    const netReceived = isReceiver ? (grossAmount - commissionAmount) : grossAmount;
+	                    const completedAt = transfer.CompletedAt || transfer.completed_at || '';
+	                    const senderApproved = transfer.ApprovedBySenderOwner ?? transfer.approved_by_sender_owner ?? false;
+	                    const receiverApproved = transfer.ApprovedByReceiverOwner ?? transfer.approved_by_receiver_owner ?? false;
+	                    const createdAt =
+	                        transfer.CreatedAt ||
+	                        transfer.created_at ||
+	                        transfer.SenderApprovedAt ||
+	                        transfer.sender_approved_at ||
+	                        '';
+	                    const eventTime = completedAt || createdAt;
 
-                    return {
-                        transaction_id: transfer.TransferRequestID || transfer.transfer_request_id || '',
-                        transaction_category: 'TRANSFER', // Category label
-                        transaction_type: isSender ? 'DEBIT' : 'CREDIT',
+	                    return {
+	                        transaction_id: transfer.TransferRequestID || transfer.transfer_request_id || '',
+	                        transaction_category: 'TRANSFER', // Category label
+	                        transaction_type: isSender ? 'DEBIT' : 'CREDIT',
                         transaction_type_description: isSender 
                             ? `Transfer sent to ${transfer.ReceiverCustomerName || 'Customer'}` 
                             : `Transfer received from ${transfer.SenderCustomerName || 'Customer'}`,
@@ -6225,18 +6233,20 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
                         commission_amount: commissionAmount,
                         commission_description: `${(transfer.CommissionPercentage || 0).toFixed(2)}% commission (${commissionAmount} ${transfer.ReceiverCurrency || ''})`,
                         net_amount: netReceived,
-                        sender: transfer.SenderCustomerName || transfer.sender_customer_name || '',
-                        receiver: transfer.ReceiverCustomerName || transfer.receiver_customer_name || '',
-                        sender_customer_token_id: transfer.SenderCustomerTokenID || transfer.sender_customer_token_id || '',
-                        receiver_customer_token_id: transfer.ReceiverCustomerTokenID || transfer.receiver_customer_token_id || '',
-                        status: transfer.Status || transfer.status || 'Completed',
-                        timestamp: completedAt,
-                        sort_timestamp: completedAt ? new Date(completedAt).getTime() : 0,
-                        // Receiver currency and amount information
-                        receiver_currency: transfer.ReceiverCurrency || transfer.receiver_currency || '',
-                        receiver_amount: transfer.ReceiverCustomerAmount || transfer.receiver_customer_amount || netReceived,
-                        exchange_rate: transfer.ExchangeRate || transfer.exchange_rate || 1.0,
-                        converted_amount: transfer.ConvertedAmount || transfer.converted_amount || (transfer.Amount || grossAmount) * (transfer.ExchangeRate || 1.0)
+	                        sender: transfer.SenderCustomerName || transfer.sender_customer_name || '',
+	                        receiver: transfer.ReceiverCustomerName || transfer.receiver_customer_name || '',
+	                        sender_customer_token_id: transfer.SenderCustomerTokenID || transfer.sender_customer_token_id || '',
+	                        receiver_customer_token_id: transfer.ReceiverCustomerTokenID || transfer.receiver_customer_token_id || '',
+	                        status: transfer.Status || transfer.status || 'Completed',
+	                        timestamp: eventTime,
+	                        sort_timestamp: eventTime ? new Date(eventTime).getTime() : 0,
+	                        approved_by_sender_owner: Boolean(senderApproved),
+	                        approved_by_receiver_owner: Boolean(receiverApproved),
+	                        // Receiver currency and amount information
+	                        receiver_currency: transfer.ReceiverCurrency || transfer.receiver_currency || '',
+	                        receiver_amount: transfer.ReceiverCustomerAmount || transfer.receiver_customer_amount || netReceived,
+	                        exchange_rate: transfer.ExchangeRate || transfer.exchange_rate || 1.0,
+	                        converted_amount: transfer.ConvertedAmount || transfer.converted_amount || (transfer.Amount || grossAmount) * (transfer.ExchangeRate || 1.0)
                     };
                 });
 
@@ -6252,25 +6262,34 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
                         customerId
                     );
 
-                    const mappedMints = (Array.isArray(approvedMintRequests) ? approvedMintRequests : []).map(mintReq => ({
-                        transaction_id: mintReq.RequestID || mintReq.request_id || '',
-                        transaction_category: 'MINT', // Category label
-                        customer_id: mintReq.CustomerID || mintReq.customer_id || '',
-                        transaction_type: 'CREDIT',
-                        transaction_type_description: 'Funds added to account (Mint approved)',
-                        amount: mintReq.Amount || mintReq.amount || 0,
-                        currency: mintReq.Currency || mintReq.currency || '',
-                        commission_amount: 0,
-                        commission_description: 'No commission',
-                        net_amount: mintReq.Amount || mintReq.amount || 0,
-                        sender: 'Bank',
-                        receiver: customerId,
-                        status: mintReq.Approved ? 'APPROVED' : 'PENDING',
-                        timestamp: mintReq.ApprovedAt || mintReq.approved_at || '',
-                        sort_timestamp: (mintReq.ApprovedAt || mintReq.approved_at) 
-                            ? new Date(mintReq.ApprovedAt || mintReq.approved_at).getTime() 
-                            : 0
-                    }));
+                    const mappedMints = (Array.isArray(approvedMintRequests) ? approvedMintRequests : []).map(mintReq => {
+                        const approved = mintReq.Approved !== undefined ? mintReq.Approved : Boolean(mintReq.approved);
+                        const rawStatus = mintReq.Status || mintReq.status || '';
+                        const normalizedStatus = String(rawStatus).trim().toUpperCase();
+                        const resolvedStatus = normalizedStatus
+                            ? (['APPROVED', 'SUCCESS', 'DONE'].includes(normalizedStatus) ? 'COMPLETED' : normalizedStatus)
+                            : (approved ? 'COMPLETED' : 'PENDING');
+
+                        return {
+                            transaction_id: mintReq.RequestID || mintReq.request_id || '',
+                            transaction_category: 'MINT', // Category label
+                            customer_id: mintReq.CustomerID || mintReq.customer_id || '',
+                            transaction_type: 'CREDIT',
+                            transaction_type_description: 'Funds added to account (Mint approved)',
+                            amount: mintReq.Amount || mintReq.amount || 0,
+                            currency: mintReq.Currency || mintReq.currency || '',
+                            commission_amount: 0,
+                            commission_description: 'No commission',
+                            net_amount: mintReq.Amount || mintReq.amount || 0,
+                            sender: 'Bank',
+                            receiver: customerId,
+                            status: resolvedStatus,
+                            timestamp: mintReq.ApprovedAt || mintReq.approved_at || '',
+                            sort_timestamp: (mintReq.ApprovedAt || mintReq.approved_at) 
+                                ? new Date(mintReq.ApprovedAt || mintReq.approved_at).getTime() 
+                                : 0
+                        };
+                    });
 
                     allTransactions.push(...mappedMints);
                 } catch (mintErr) {
@@ -6405,21 +6424,30 @@ app.get('/api/customer/mint-history', authenticateJWT, async (req, res) => {
             );
 
             // Map to response format with transaction type
-            let mappedMintRequests = (Array.isArray(approvedMintRequests) ? approvedMintRequests : []).map(mintReq => ({
-                request_id: mintReq.RequestID || mintReq.request_id || '',
-                customer_id: mintReq.CustomerID || mintReq.customer_id || '',
-                transaction_type: 'CREDIT',
-                transaction_type_description: 'Funds added to account (Mint approved)',
-                token_id: mintReq.TokenID || mintReq.token_id || '',
-                currency: mintReq.Currency || mintReq.currency || '',
-                amount: mintReq.Amount || mintReq.amount || 0,
-                status: mintReq.Status || mintReq.status || 'PENDING',
-                approved: mintReq.Approved !== undefined ? mintReq.Approved : (mintReq.approved || false),
-                approved_at: mintReq.ApprovedAt || mintReq.approved_at || '',
-                name: mintReq.Name || mintReq.name || '',
-                kyc_id: mintReq.KycId || mintReq.kyc_id || '',
-                kyc_status: mintReq.KycStatus || mintReq.kyc_status || ''
-            }));
+            let mappedMintRequests = (Array.isArray(approvedMintRequests) ? approvedMintRequests : []).map(mintReq => {
+                const approved = mintReq.Approved !== undefined ? mintReq.Approved : Boolean(mintReq.approved);
+                const rawStatus = mintReq.Status || mintReq.status || '';
+                const normalizedStatus = String(rawStatus).trim().toUpperCase();
+                const resolvedStatus = normalizedStatus
+                    ? (['APPROVED', 'SUCCESS', 'DONE'].includes(normalizedStatus) ? 'COMPLETED' : normalizedStatus)
+                    : (approved ? 'COMPLETED' : 'PENDING');
+
+                return {
+                    request_id: mintReq.RequestID || mintReq.request_id || '',
+                    customer_id: mintReq.CustomerID || mintReq.customer_id || '',
+                    transaction_type: 'CREDIT',
+                    transaction_type_description: 'Funds added to account (Mint approved)',
+                    token_id: mintReq.TokenID || mintReq.token_id || '',
+                    currency: mintReq.Currency || mintReq.currency || '',
+                    amount: mintReq.Amount || mintReq.amount || 0,
+                    status: resolvedStatus,
+                    approved: approved,
+                    approved_at: mintReq.ApprovedAt || mintReq.approved_at || '',
+                    name: mintReq.Name || mintReq.name || '',
+                    kyc_id: mintReq.KycId || mintReq.kyc_id || '',
+                    kyc_status: mintReq.KycStatus || mintReq.kyc_status || ''
+                };
+            });
 
             // Filter by date range if provided
             if (from_date || to_date) {
@@ -6584,18 +6612,20 @@ app.post('/api/bank/customer-to-token-transfers/approve-receiver', authenticateJ
                 const exchangeRate = await getFXRate(senderCurrency, receiverCurrency);
                 
                 // Commission deducted from sender amount FIRST (in sender's currency)
-                const commissionInSender = amount * 0.02; // 2% commission in sender currency (float)
+                // Use the transfer's configured commission percentage from chaincode, do not hardcode 2%.
+                const commissionPercentage =
+                    Number(transfer.commission_percentage ?? transfer.CommissionPercentage ?? 0);
+                const commissionInSender = amount * (commissionPercentage / 100);
                 const remainingAfterCommission = amount - commissionInSender; // Full precision
                 
                 // Convert remaining amount at exact exchange rate (full precision)
                 const convertedAmountExact = remainingAfterCommission * exchangeRate;
-                const convertedAmount = Math.round(convertedAmountExact); // Round only for storage
+                const convertedAmount = Number(convertedAmountExact.toFixed(2));
                 
                 console.log(`Exchange rate: ${senderCurrency}/${receiverCurrency} = ${exchangeRate}`);
-                console.log(`Commission (2% of ${amount}): ${commissionInSender.toFixed(2)} ${senderCurrency}`);
+                console.log(`Commission (${commissionPercentage}% of ${amount}): ${commissionInSender.toFixed(2)} ${senderCurrency}`);
                 console.log(`Remaining after commission: ${remainingAfterCommission.toFixed(2)} ${senderCurrency}`);
-                console.log(`Exact conversion: ${remainingAfterCommission.toFixed(2)} × ${exchangeRate} = ${convertedAmountExact.toFixed(2)} ${receiverCurrency}`);
-                console.log(`Rounded converted amount: ${convertedAmount} ${receiverCurrency}`);
+                console.log(`Exact conversion: ${remainingAfterCommission.toFixed(2)} × ${exchangeRate} = ${convertedAmount} ${receiverCurrency}`);
 
                 // Store exchange rate and converted amount in transfer for chaincode to use
                 // These will be passed to the chaincode during approval
