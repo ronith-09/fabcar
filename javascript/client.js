@@ -178,12 +178,13 @@ class FabCarClient {
     /**
      * Request to mint coins
      */
-    async requestMint(networkAddress, amount) {
+    async requestMint(networkAddress, amount, purpose = 'WORKING_CAPITAL') {
         try {
             const response = await makeRequest('POST', '/mint-request', {
                 userId: this.userId,
                 networkAddress,
-                amount
+                amount,
+                purpose
             });
             console.log('✓ Mint request submitted:', response);
             return response;

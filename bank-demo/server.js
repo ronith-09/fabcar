@@ -205,6 +205,10 @@ function writeDB(data) {
   fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
 }
 
+function normalizeNetworkAddress(value) {
+  return String(value || '').trim().replace(/=+$/g, '');
+}
+
 // Simple auth: register & login (demo only — do NOT use in production)
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString('hex');
@@ -653,6 +657,45 @@ app.post('/api/register-customer-token', (req, res) => {
   });
 });
 
+// Secure endpoint for simple dashboard "View Full Data".
+app.get('/api/customer/dashboard-view', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  let user;
+  try {
+    user = jwt.verify(token, JWT_SECRET);
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  const selectedToken = String(req.query.tokenId || '').trim();
+  const db = readDB();
+  const registrations = Array.isArray(db.tokenRegistrations)
+    ? db.tokenRegistrations.filter(entry => entry && entry.userId === user.sub)
+    : [];
+  const filteredRegistrations = selectedToken
+    ? registrations.filter(entry => String(entry.tokenId || '').trim() === selectedToken)
+    : registrations;
+
+  return res.json({
+    ok: true,
+    data: {
+      user: {
+        id: user.sub,
+        role: user.role || 'customer'
+      },
+      selectedToken: selectedToken || null,
+      registrations: filteredRegistrations,
+      totalAccounts: registrations.length,
+      generatedAt: new Date().toISOString()
+    }
+  });
+});
+
 // Customer Dashboard (protected route)
 app.get('/customer-dashboard', (req, res) => {
   res.send(`<!doctype html>
@@ -676,6 +719,7 @@ app.get('/customer-dashboard', (req, res) => {
       .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
       .action-btn { background: #0ea5e9; color: white; padding: 16px; border-radius: 12px; text-align: center; text-decoration: none; cursor: pointer; border: none; font-size: 15px; }
       .action-btn:hover { background: #0284c7; }
+      .view-panel { display: none; margin-top: 18px; background: #0f172a; color: #e2e8f0; border-radius: 12px; padding: 16px; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
     </style>
   </head>
   <body>
@@ -704,11 +748,12 @@ app.get('/customer-dashboard', (req, res) => {
       </div>
       
       <div class="actions">
-        <button class="action-btn">View Balance →</button>
+        <button class="action-btn" id="viewWalletBtn">View Full Data →</button>
         <button class="action-btn">Send Transfer →</button>
         <button class="action-btn">Transaction History →</button>
         <button class="action-btn">Account Settings →</button>
       </div>
+      <pre id="walletViewPanel" class="view-panel"></pre>
     </main>
     <script>
       const authToken = localStorage.getItem('authToken');
@@ -722,6 +767,39 @@ app.get('/customer-dashboard', (req, res) => {
       document.getElementById('tokenValue').textContent = selectedToken || 'N/A';
       document.getElementById('statusValue').textContent = 'Active ✓';
       document.getElementById('dateValue').textContent = new Date().toLocaleDateString();
+      const viewBtn = document.getElementById('viewWalletBtn');
+      const viewPanel = document.getElementById('walletViewPanel');
+      let isViewOpen = false;
+      viewBtn.addEventListener('click', async () => {
+        if (isViewOpen) {
+          isViewOpen = false;
+          viewPanel.style.display = 'none';
+          viewBtn.textContent = 'View Full Data →';
+          return;
+        }
+        try {
+          const params = selectedToken ? ('?tokenId=' + encodeURIComponent(selectedToken)) : '';
+          const response = await fetch('/api/customer/dashboard-view' + params, {
+            method: 'GET',
+            headers: {
+              'Authorization': 'Bearer ' + authToken
+            }
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || 'Failed to load dashboard view');
+          }
+          viewPanel.textContent = JSON.stringify(data.data || data, null, 2);
+          viewPanel.style.display = 'block';
+          isViewOpen = true;
+          viewBtn.textContent = 'Hide Full Data →';
+        } catch (error) {
+          viewPanel.textContent = 'Error: ' + error.message;
+          viewPanel.style.display = 'block';
+          isViewOpen = true;
+          viewBtn.textContent = 'Hide Full Data →';
+        }
+      });
       
       function logout() {
         localStorage.removeItem('authToken');
@@ -949,7 +1027,11 @@ app.post('/between/login', async (req, res) => {
       return res.status(401).json({ ok: false, error: 'invalid credentials' });
     }
 
-    const kycId = `kyc_${Date.now()}`;
+    // Use the bank database primary customer id as canonical KYC/customer identifier.
+    const kycId = String(user.id || '').trim();
+    if (!kycId) {
+      return res.status(500).json({ ok: false, error: 'bank customer id missing; cannot derive kycId' });
+    }
     const event = recordKYCEvent({
       eventId: `kyc_evt_${Date.now()}`,
       tokenId,
@@ -1016,15 +1098,32 @@ app.get('/between/customer/:id', (req, res) => {
     return res.status(401).json({ ok: false, error: 'Unauthorized: Invalid API Key' });
   }
 
-  const customerId = req.params.id;
+  const lookupId = String(req.params.id || '').trim();
+  if (!lookupId) {
+    return res.status(400).json({ ok: false, error: 'Customer identifier is required' });
+  }
   const db = readDB();
-  const user = (db.users || []).find(u => u.id === customerId);
+  let user = (db.users || []).find(u => String(u?.id || '').trim() === lookupId);
+  let matchedEvent = null;
+
+  // Support KYC-ID based lookup so BetweenNetwork customer refs can resolve to bank-side user records.
+  if (!user) {
+    matchedEvent = (db.kycEvents || [])
+      .filter(evt => String(evt?.kycId || '').trim() === lookupId)
+      .sort((a, b) => new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime())[0] || null;
+    if (matchedEvent?.customerId) {
+      user = (db.users || []).find(u => String(u?.id || '').trim() === String(matchedEvent.customerId || '').trim()) || null;
+    }
+  }
 
   if (!user) {
     return res.status(404).json({ ok: false, error: 'Customer not found' });
   }
 
-  // Return only necessary PII
+  const latestKycEvent = matchedEvent || (db.kycEvents || [])
+    .filter(evt => String(evt?.customerId || '').trim() === String(user.id || '').trim())
+    .sort((a, b) => new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime())[0] || null;
+
   res.json({
     ok: true,
     customer: {
@@ -1034,7 +1133,63 @@ app.get('/between/customer/:id', (req, res) => {
       phone: user.phone,
       nationalId: user.nationalId || 'N/A',
       address: user.address || 'N/A',
-      joinedAt: user.createdAt
+      joinedAt: user.createdAt,
+      kycId: latestKycEvent?.kycId || '',
+      kycStatus: typeof latestKycEvent?.kycStatus === 'undefined' ? '' : latestKycEvent.kycStatus,
+      tokenId: latestKycEvent?.tokenId || '',
+      lastKycEventAt: latestKycEvent?.createdAt || ''
+    }
+  });
+});
+
+// SECURED: Lookup customer by BetweenNetwork network address.
+// This allows backend systems to resolve bank-side customer PII even when they only have networkAddress.
+app.get('/between/customer/by-network/:networkAddress', (req, res) => {
+  const apiKey = req.headers['x-bank-api-key'];
+  if (!apiKey || apiKey !== BANK_API_KEY) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized: Invalid API Key' });
+  }
+
+  const networkAddress = decodeURIComponent(String(req.params.networkAddress || '').trim());
+  const tokenId = String(req.query?.tokenId || '').trim();
+  if (!networkAddress) {
+    return res.status(400).json({ ok: false, error: 'networkAddress is required' });
+  }
+
+  const db = readDB();
+  const normalizedLookup = normalizeNetworkAddress(networkAddress);
+  const matchedEvent = (db.kycEvents || [])
+    .filter(evt => {
+      const eventNetwork = normalizeNetworkAddress(evt?.networkAddress || '');
+      if (!eventNetwork || eventNetwork !== normalizedLookup) return false;
+      if (!tokenId) return true;
+      return String(evt?.tokenId || '').trim() === tokenId;
+    })
+    .sort((a, b) => new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime())[0] || null;
+  if (!matchedEvent || !matchedEvent.customerId) {
+    return res.status(404).json({ ok: false, error: 'Customer not found for network address' });
+  }
+
+  const user = (db.users || []).find(u => u.id === matchedEvent.customerId);
+  if (!user) {
+    return res.status(404).json({ ok: false, error: 'Customer record not found in bank DB' });
+  }
+
+  res.json({
+    ok: true,
+    customer: {
+      id: user.id,
+      name: user.name,
+      email: user.email || 'N/A',
+      phone: user.phone,
+      nationalId: user.nationalId || 'N/A',
+      address: user.address || 'N/A',
+      joinedAt: user.createdAt,
+      networkAddress,
+      kycId: matchedEvent.kycId || '',
+      kycStatus: typeof matchedEvent.kycStatus === 'undefined' ? '' : matchedEvent.kycStatus,
+      tokenId: matchedEvent.tokenId || '',
+      lastKycEventAt: matchedEvent.createdAt || ''
     }
   });
 });

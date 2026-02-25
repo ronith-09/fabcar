@@ -112,6 +112,10 @@ function formatTokenDisplayID(token) {
     if (!token) {
         return '';
     }
+    const explicitDisplayId = (token.display_token_id || token.DisplayTokenID || '').trim();
+    if (explicitDisplayId) {
+        return explicitDisplayId;
+    }
     const tokenID = token.token_id || token.TokenID || '';
     if (token.owner) {
         const bankCode = deriveBankCode(token.owner);
@@ -125,14 +129,43 @@ function formatTokenDisplayID(token) {
     return tokenID;
 }
 
-async function requestTokenRequest(name, networkAddress, country, currency, walletPath, userId) {
+async function requestTokenRequest(institutionID, institutionName, countryCode, currencyCode, reference, walletPath, userId) {
     const { gateway, contract } = await connect(walletPath, userId);
     try {
-        if (!currency || !currency.trim()) {
-            throw new Error('currency is required when requesting a token');
+        if (!institutionID || !institutionID.trim()) {
+            throw new Error('institution_id is required when requesting a token');
         }
-        await contract.submitTransaction('RequestTokenRequest', name, networkAddress, country, currency);
-        console.log('Token request submitted');
+        if (!institutionName || !institutionName.trim()) {
+            throw new Error('institution_name is required when requesting a token');
+        }
+        if (!countryCode || !countryCode.trim()) {
+            throw new Error('country_code is required when requesting a token');
+        }
+        if (!currencyCode || !currencyCode.trim()) {
+            throw new Error('currency_code is required when requesting a token');
+        }
+        if (!reference || !reference.trim()) {
+            throw new Error('reference is required when requesting a token');
+        }
+
+        const result = await contract.submitTransaction(
+            'RequestTokenRequest',
+            institutionID,
+            institutionName,
+            countryCode,
+            currencyCode,
+            reference
+        );
+
+        const payload = result.toString().trim();
+        if (!payload) {
+            return {};
+        }
+        try {
+            return JSON.parse(payload);
+        } catch (_e) {
+            return { raw: payload };
+        }
     } finally {
         gateway.disconnect();
     }
@@ -173,10 +206,17 @@ async function getTokenAccess(networkAddress, walletPath, userId) {
     }
 }
 
-async function requestMintCoins(networkAddress, amount, walletPath, userId) {
+async function requestMintCoins(networkAddress, amount, walletPath, userId, purpose = 'WORKING_CAPITAL') {
     const { gateway, contract } = await connect(walletPath, userId);
     try {
-        await contract.submitTransaction('RequestMintCoins', networkAddress, amount.toString());
+        const normalizedPurpose = String(purpose || 'WORKING_CAPITAL').trim().toUpperCase();
+        const normalizedAmount = String(Math.trunc(Number(amount)));
+        try {
+            await contract.submitTransaction('RequestTokenMint', normalizedAmount, normalizedPurpose);
+        } catch (err) {
+            // Backward compatibility for nodes still running legacy chaincode signature.
+            await contract.submitTransaction('RequestMintCoins', networkAddress, normalizedAmount);
+        }
         console.log('Mint request submitted');
     } finally {
         gateway.disconnect();
@@ -374,21 +414,53 @@ async function initRootTokens(walletPath, userId) {
 async function listAssignedTokens(walletPath, userId) {
     const { gateway, contract } = await connect(walletPath, userId);
     try {
-        const result = await contract.evaluateTransaction('ListAssignedTokens');
-        const payload = result.toString().trim();
-        if (!payload) {
-            return [];
+        const normalizeToken = token => ({
+            ...token,
+            token_id: token.token_id || token.TokenID || token.tokenId || '',
+            minted: Number(
+                token.minted ??
+                token.Minted ??
+                token.total_supply ??
+                token.TotalSupply ??
+                0
+            ),
+            transfer_ids: Array.isArray(token.transfer_ids) ? token.transfer_ids : [],
+            foreign_balances: token.foreign_balances || {},
+            foreign_locked_balance: token.foreign_locked_balance || {},
+            display_token_id: formatTokenDisplayID(token)
+        });
+
+        try {
+            const result = await contract.evaluateTransaction('ListAssignedTokens');
+            const payload = result.toString().trim();
+            if (!payload) {
+                return [];
+            }
+            const assigned = JSON.parse(payload);
+            return Array.isArray(assigned) ? assigned.map(normalizeToken) : [];
+        } catch (listErr) {
+            const errMsg = String(listErr?.message || '');
+            const isSchemaMismatch = errMsg.includes('did not match schema');
+            if (!isSchemaMismatch) {
+                throw listErr;
+            }
+
+            // Compatibility fallback for newer chaincode token shape.
+            const allResult = await contract.evaluateTransaction('ViewAllTokens');
+            const allPayload = allResult.toString().trim();
+            if (!allPayload) {
+                return [];
+            }
+            const allTokens = JSON.parse(allPayload);
+            const filtered = Array.isArray(allTokens)
+                ? allTokens.filter(token => {
+                    const status = String(token?.status || token?.Status || '').trim().toUpperCase();
+                    const frozen = Boolean(token?.is_frozen || token?.IsFrozen);
+                    return !frozen && status !== 'FROZEN' && status !== 'EXPIRED';
+                })
+                : [];
+            return filtered.map(normalizeToken);
         }
-        const assigned = JSON.parse(payload);
-        return Array.isArray(assigned)
-            ? assigned.map(token => ({
-                ...token,
-                transfer_ids: Array.isArray(token.transfer_ids) ? token.transfer_ids : [],
-                foreign_balances: token.foreign_balances || {},
-                foreign_locked_balance: token.foreign_locked_balance || {},
-                display_token_id: formatTokenDisplayID(token)
-            }))
-            : [];
     } finally {
         gateway.disconnect();
     }
@@ -432,6 +504,21 @@ async function listApprovedParticipantMintRequests(walletPath, userId) {
             return [];
         }
         return JSON.parse(payload);
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+async function listTokenMintRecords(walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('ListTokenMintRecords');
+        const payload = result.toString().trim();
+        if (!payload) {
+            return [];
+        }
+        const records = JSON.parse(payload);
+        return Array.isArray(records) ? records : [];
     } finally {
         gateway.disconnect();
     }
@@ -630,6 +717,16 @@ async function approveCustomerRegistration(requestId, ownerNetworkAddress, walle
     }
 }
 
+async function rejectCustomerRegistration(requestId, ownerNetworkAddress, walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        await contract.submitTransaction('RejectCustomerRegistration', requestId, ownerNetworkAddress);
+        console.log('Customer registration rejected');
+    } finally {
+        gateway.disconnect();
+    }
+}
+
 async function upsertCustomerFromBank(networkAddress, clientID, tokenID, kycID, kycStatus, walletPath, userId) {
     if (!networkAddress || !tokenID) {
         throw new Error('networkAddress and tokenID are required');
@@ -695,6 +792,16 @@ async function approveCustomerMint(requestId, ownerNetworkAddress, walletPath, u
     }
 }
 
+async function rejectCustomerMint(requestId, ownerNetworkAddress, walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        await contract.submitTransaction('RejectCustomerMint', requestId, ownerNetworkAddress);
+        console.log('Customer mint rejected');
+    } finally {
+        gateway.disconnect();
+    }
+}
+
 async function viewCustomerWallet(networkAddress, tokenID, walletPath, userId) {
     const { gateway, contract } = await connect(walletPath, userId);
     try {
@@ -705,11 +812,113 @@ async function viewCustomerWallet(networkAddress, tokenID, walletPath, userId) {
     }
 }
 
+async function probeCustomerTokenIDByWallet(networkAddress, walletPath, userId, maxTokens = 25) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        for (let i = 1; i <= maxTokens; i += 1) {
+            const tokenID = `token_${i}`;
+            try {
+                const result = await contract.evaluateTransaction('ViewCustomerWallet', networkAddress, tokenID);
+                const payload = result.toString().trim();
+                if (!payload) {
+                    continue;
+                }
+                const walletData = JSON.parse(payload);
+                const resolvedToken =
+                    walletData?.tokenID ||
+                    walletData?.tokenId ||
+                    walletData?.token_id ||
+                    walletData?.token;
+                if (resolvedToken) {
+                    return resolvedToken;
+                }
+            } catch (_probeError) {
+                // Ignore per-token probe failures; continue scanning.
+            }
+        }
+        return null;
+    } finally {
+        gateway.disconnect();
+    }
+}
+
 async function getCustomerIDAccess(networkAddress, tokenID, walletPath, userId) {
     const { gateway, contract } = await connect(walletPath, userId);
     try {
         const result = await contract.evaluateTransaction('GetCustomerIDAccess', networkAddress, tokenID);
         return JSON.parse(result.toString());
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+async function getCustomerTokenApprovalStatus(networkAddress, tokenID, walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        try {
+            const result = await contract.evaluateTransaction(
+                'GetCustomerTokenApprovalStatus',
+                networkAddress || '',
+                tokenID || ''
+            );
+            const payload = result.toString().trim();
+            if (!payload) {
+                return {};
+            }
+            return JSON.parse(payload);
+        } catch (err) {
+            const msg = String(err?.message || '');
+            if (
+                msg.includes('Function GetCustomerTokenApprovalStatus not found') ||
+                msg.includes('function GetCustomerTokenApprovalStatus not found')
+            ) {
+                // Backward compatibility for older deployed chaincode packages.
+                const legacyResult = await contract.evaluateTransaction(
+                    'GetCustomerIDAccess',
+                    networkAddress || '',
+                    tokenID || ''
+                );
+                const legacyPayload = legacyResult.toString().trim();
+                if (!legacyPayload) {
+                    return {};
+                }
+                return JSON.parse(legacyPayload);
+            }
+            throw err;
+        }
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+async function getMyCustomerAccounts(walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('GetMyCustomerAccounts');
+        const payload = result.toString().trim();
+        if (!payload) {
+            return [];
+        }
+        const accounts = JSON.parse(payload);
+        return Array.isArray(accounts) ? accounts : [];
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+async function getCustomerTokenWalletDetails(customerRef, tokenID, walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction(
+            'GetCustomerTokenWallet',
+            customerRef || '',
+            tokenID || ''
+        );
+        const payload = result.toString().trim();
+        if (!payload) {
+            return {};
+        }
+        return JSON.parse(payload);
     } finally {
         gateway.disconnect();
     }
@@ -735,18 +944,33 @@ async function createTransferRequest(senderParticipantID, senderTokenTransferID,
 
 // Transfer request functions removed - use token transfer functions instead
 
-async function createTokenTransferRequest(senderTokenID, receiverTokenID, senderOwnerAddress, amount, walletPath, userId) {
+async function createTokenTransferRequest(senderTokenID, receiverTokenID, senderOwnerAddress, amount, purpose, walletPath, userId) {
     const { gateway, contract } = await connect(walletPath, userId);
     try {
-        const requestID = await contract.submitTransaction(
-            'CreateTokenTransferRequest',
-            senderTokenID,
-            receiverTokenID,
-            senderOwnerAddress,
-            amount.toString()
-        );
-        console.log(`Token transfer request created: ${requestID.toString()}`);
-        return requestID.toString();
+        const resolvedPurpose = (purpose || 'INTERBANK_SETTLEMENT').toString();
+        try {
+            const msgID = await contract.submitTransaction(
+                'RequestBankTransfer',
+                senderTokenID,
+                receiverTokenID,
+                senderOwnerAddress,
+                amount.toString(),
+                resolvedPurpose
+            );
+            console.log(`Token transfer request created (bank format): ${msgID.toString()}`);
+            return msgID.toString();
+        } catch (bankErr) {
+            console.warn(`RequestBankTransfer failed, falling back to CreateTokenTransferRequest: ${bankErr.message}`);
+            const requestID = await contract.submitTransaction(
+                'CreateTokenTransferRequest',
+                senderTokenID,
+                receiverTokenID,
+                senderOwnerAddress,
+                amount.toString()
+            );
+            console.log(`Token transfer request created (legacy format): ${requestID.toString()}`);
+            return requestID.toString();
+        }
     } finally {
         gateway.disconnect();
     }
@@ -836,6 +1060,48 @@ async function listParticipantTransfersByID(participantID, walletPath, userId) {
         const payload = result.toString().trim();
         if (!payload) {
             return [];
+        }
+        return JSON.parse(payload);
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+async function getSenderRecords(walletPath, userId, senderBIC) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('GetSenderRecords', senderBIC);
+        const payload = result.toString().trim();
+        if (!payload) {
+            return [];
+        }
+        return JSON.parse(payload);
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+async function getReceiverRecords(walletPath, userId, receiverBIC) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('GetReceiverRecords', receiverBIC);
+        const payload = result.toString().trim();
+        if (!payload) {
+            return [];
+        }
+        return JSON.parse(payload);
+    } finally {
+        gateway.disconnect();
+    }
+}
+
+async function totalVolumeByBIC(walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('TotalVolumeByBIC');
+        const payload = result.toString().trim();
+        if (!payload) {
+            return {};
         }
         return JSON.parse(payload);
     } finally {
@@ -980,16 +1246,23 @@ module.exports = {
     listApprovedCustomers,
     listAllApprovedCustomers,
     approveCustomerRegistration,
+    rejectCustomerRegistration,
     upsertCustomerFromBank,
     customerRequestMint,
     viewPendingCustomerMintRequests,
     approveCustomerMint,
+    rejectCustomerMint,
     viewCustomerWallet,
+    probeCustomerTokenIDByWallet,
     getCustomerIDAccess,
+    getCustomerTokenApprovalStatus,
+    getMyCustomerAccounts,
+    getCustomerTokenWalletDetails,
     getApprovedMintRequests,
     getApprovedMintRequestsForCustomer,
     getMyApprovedMintRequests,
     listApprovedParticipantMintRequests,
+    listTokenMintRecords,
     createTransferRequest,
 
     createTokenTransferRequest,
@@ -1000,6 +1273,9 @@ module.exports = {
     listParticipantTransferHistory,
     listAllParticipantTransferHistory,
     listParticipantTransfersByID,
+    getSenderRecords,
+    getReceiverRecords,
+    totalVolumeByBIC,
     requestTokenHandshake,
     viewPendingTokenHandshakes,
     tokenHandshakeApprove,
@@ -1007,12 +1283,18 @@ module.exports = {
     viewTokenHandshakes,
     
     createCustomerToTokenTransferRequest,
+    requestCustomerTransfer,
     approveSenderTokenTransfer,
+    rejectSenderPreEscrow,
     approveReceiverTokenTransfer,
+    rejectReceiver,
     viewPendingCustomerToTokenTransfersAsSender,
     viewPendingCustomerToTokenTransfersAsReceiver,
     getCustomerToTokenTransferHistory,
     getCustomerToTokenTransferHistoryByCustomer,
+    getRejectedByReason,
+    getRejectedByBank,
+    getExpiredEscrowReturns,
     updateExchangeRate,
     setTokenCommission,
     getTokenCommission,
@@ -1100,26 +1382,23 @@ async function createCustomerToTokenTransferRequest(
     walletPath,
     userId,
     senderNetworkAddress,
-    senderTokenID,
-    receiverTokenID,
-    receiverCustomerNetworkAddress,
+    receiverCustomerRef,
+    receiverBIC,
     amount
 ) {
     const { gateway, contract } = await connect(walletPath, userId);
     try {
         console.log(`[CHAINCODE] Creating customer-to-token transfer request:`, {
             senderNetworkAddress,
-            senderTokenID,
-            receiverTokenID,
-            receiverCustomerNetworkAddress,
+            receiverCustomerRef,
+            receiverBIC,
             amount
         });
         const result = await contract.submitTransaction(
             'CreateCustomerToTokenTransferRequest',
             senderNetworkAddress,
-            senderTokenID,
-            receiverTokenID,
-            receiverCustomerNetworkAddress,
+            receiverCustomerRef,
+            receiverBIC,
             amount.toString()
         );
         const transferRequestID = result.toString();
@@ -1128,6 +1407,22 @@ async function createCustomerToTokenTransferRequest(
     } catch (error) {
         console.error('[CHAINCODE] CreateCustomerToTokenTransferRequest failed:', error.message);
         throw error;
+    } finally {
+        await gateway.disconnect();
+    }
+}
+
+// Privacy-safe BIC-based customer transfer (token IDs resolved in chaincode).
+async function requestCustomerTransfer(walletPath, userId, receiverCustomerRef, receiverBIC, amount) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.submitTransaction(
+            'RequestCustomerTransfer',
+            receiverCustomerRef,
+            receiverBIC,
+            amount.toString()
+        );
+        return result.toString();
     } finally {
         await gateway.disconnect();
     }
@@ -1158,6 +1453,26 @@ async function approveSenderTokenTransfer(
     } catch (error) {
         console.error('[CHAINCODE] ApproveSenderTokenTransfer failed:', error.message);
         throw error;
+    } finally {
+        await gateway.disconnect();
+    }
+}
+
+async function rejectSenderPreEscrow(
+    walletPath,
+    userId,
+    transferRequestID,
+    senderTokenOwnerAddress,
+    rejectionReason
+) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        await contract.submitTransaction(
+            'RejectSenderPreEscrow',
+            transferRequestID,
+            senderTokenOwnerAddress,
+            rejectionReason || 'SENDER_KYC_INVALID'
+        );
     } finally {
         await gateway.disconnect();
     }
@@ -1217,6 +1532,26 @@ async function approveReceiverTokenTransfer(
     } catch (error) {
         console.error('[CHAINCODE] ApproveReceiverTokenTransfer failed:', error.message);
         throw error;
+    } finally {
+        await gateway.disconnect();
+    }
+}
+
+async function rejectReceiver(
+    walletPath,
+    userId,
+    transferRequestID,
+    receiverTokenOwnerAddress,
+    rejectionReason
+) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        await contract.submitTransaction(
+            'RejectReceiver',
+            transferRequestID,
+            receiverTokenOwnerAddress,
+            rejectionReason || 'BANK_POLICY_VIOLATION'
+        );
     } finally {
         await gateway.disconnect();
     }
@@ -1352,6 +1687,39 @@ async function getCustomerToTokenTransferHistoryByCustomer(
         console.error('[CHAINCODE] GetCustomerToTokenTransferHistoryByCustomer failed:', error.message);
         console.error('[CHAINCODE] Full error:', error);
         throw error;
+    } finally {
+        await gateway.disconnect();
+    }
+}
+
+async function getRejectedByReason(walletPath, userId, reason) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('GetRejectedByReason', reason);
+        const payload = result.toString().trim();
+        return payload ? JSON.parse(payload) : [];
+    } finally {
+        await gateway.disconnect();
+    }
+}
+
+async function getRejectedByBank(walletPath, userId, receiverBIC) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('GetRejectedByBank', receiverBIC);
+        const payload = result.toString().trim();
+        return payload ? JSON.parse(payload) : [];
+    } finally {
+        await gateway.disconnect();
+    }
+}
+
+async function getExpiredEscrowReturns(walletPath, userId) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction('GetExpiredEscrowReturns');
+        const payload = result.toString().trim();
+        return payload ? JSON.parse(payload) : [];
     } finally {
         await gateway.disconnect();
     }

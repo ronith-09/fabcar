@@ -149,15 +149,19 @@ const LANES = [
         method: 'POST',
         endpoint: '/token-request',
         fields: [
-          { name: 'name', label: 'Institution Name', required: true, placeholder: 'Your institution name' },
-          { name: 'country', label: 'Country Code', defaultValue: 'US', placeholder: 'e.g., US, UK, CA' },
-          { name: 'currency', label: 'Token ID', required: true, placeholder: 'e.g., token_1' }
+          { name: 'institution_id', label: 'Institution ID (BIC11)', required: true, placeholder: 'e.g., HDFC11INXXX' },
+          { name: 'institution_name', label: 'Institution Name', required: true, placeholder: 'Your institution name' },
+          { name: 'country_code', label: 'Country Code', defaultValue: 'US', placeholder: 'e.g., US, IN, GB' },
+          { name: 'currency_code', label: 'Currency Code', required: true, placeholder: 'e.g., INR, USD' },
+          { name: 'reference', label: 'Business Reference', placeholder: 'e.g., REQ20260218-001' }
         ],
         buildRequest: values => ({
           data: cleanPayload({
-            name: values.name,
-            country: values.country,
-            currency: values.currency
+            institution_id: values.institution_id,
+            institution_name: values.institution_name,
+            country_code: values.country_code,
+            currency_code: values.currency_code,
+            reference: values.reference
           })
         })
       },
@@ -188,11 +192,13 @@ const LANES = [
         method: 'POST',
         endpoint: '/mint-request',
         fields: [
-          { name: 'amount', label: 'Amount', required: true, type: 'number', placeholder: 'Enter amount (e.g., 1000)' }
+          { name: 'amount', label: 'Amount', required: true, type: 'number', placeholder: 'Enter amount (e.g., 1000)' },
+          { name: 'purpose', label: 'Purpose', defaultValue: 'WORKING_CAPITAL', placeholder: 'WORKING_CAPITAL / SETTLEMENT / LIQUIDITY' }
         ],
         buildRequest: values => ({
           data: cleanPayload({
-            amount: values.amount
+            amount: values.amount,
+            purpose: values.purpose || 'WORKING_CAPITAL'
           })
         })
       },
@@ -679,15 +685,14 @@ const truncateId = (id, length = 30) => {
 
 // Customer Registration Card Component
 const CustomerRegistrationCard = ({ registration, onApprove, onReject, isLoading }) => {
-  const {
-    request_id,
-    name,
-    kyc_id,
-    kyc_status,
-    created_at,
-    status,
-    token_id
-  } = registration;
+  const request_id = registration.request_id || registration.msg_id || registration.RequestID || registration.MsgID || '';
+  const name = registration.name || registration.customer_ref || registration.CustomerRef || 'Customer';
+  const kyc_id = registration.kyc_id || registration.kyc_ref || registration.KycRef || '';
+  const kyc_status = registration.kyc_status || registration.KycStatus || '';
+  const created_at = registration.created_at || registration.CreatedAt || '';
+  const status = registration.status || registration.Status || '';
+  const token_id = registration.token_id || registration.TokenID || '';
+  const expires_at = registration.expires_at || registration.ExpiresAt || '';
 
   const statusBadge = status === 'PENDING' ? '🟡 Pending Approval' : status;
   const kycDisplay = formatKycStatus(kyc_status);
@@ -749,6 +754,10 @@ const CustomerRegistrationCard = ({ registration, onApprove, onReject, isLoading
         <p className="text-xs uppercase tracking-wide text-white/40 mb-1">Requested On</p>
         <p className="text-sm text-white/80">{dateDisplay}</p>
       </div>
+      <div>
+        <p className="text-xs uppercase tracking-wide text-white/40 mb-1">Expires At</p>
+        <p className="text-sm text-white/80">{formatDate(expires_at)}</p>
+      </div>
 
       <div className="flex gap-3 pt-2">
         <button
@@ -775,20 +784,27 @@ const CustomerRegistrationCard = ({ registration, onApprove, onReject, isLoading
 // Approved Customer Card Component
 const ApprovedCustomerCard = ({ customer }) => {
   const {
+    customer_ref,
     customer_id,
     username,
     kyc_status,
+    kyc_ref,
     created_at,
+    activated_at,
     approved_at,
     token_id,
+    bic,
+    status,
     name,
     email,
     phone
   } = customer;
 
   const kycDisplay = formatKycStatus(kyc_status);
-  const approvalDate = formatDate(approved_at || created_at);
-  const customerId = customer_id || username || 'N/A';
+  const approvalDate = formatDate(approved_at || activated_at || created_at);
+  const customerId = customer_ref || customer_id || username || 'N/A';
+  const statusLabel = String(status || 'ACTIVE').toUpperCase();
+  const isActive = statusLabel === 'ACTIVE' || statusLabel === 'APPROVED';
 
   return (
     <div className="glass-panel p-6 border border-white/5 space-y-4 hover:border-accent/30 transition">
@@ -798,8 +814,8 @@ const ApprovedCustomerCard = ({ customer }) => {
           <h4 className="text-lg font-semibold text-white">{name || username || 'Customer'}</h4>
         </div>
         <div>
-          <span className="inline-block px-3 py-1 rounded-full bg-green-500/20 border border-green-500/40 text-xs font-medium text-green-300">
-            ✅ Active
+          <span className={`inline-block px-3 py-1 rounded-full text-xs font-medium ${isActive ? 'bg-green-500/20 border border-green-500/40 text-green-300' : 'bg-yellow-500/20 border border-yellow-500/40 text-yellow-300'}`}>
+            {isActive ? '✅ Active' : `⏳ ${statusLabel}`}
           </span>
         </div>
       </div>
@@ -824,6 +840,10 @@ const ApprovedCustomerCard = ({ customer }) => {
         <div>
           <p className="text-xs uppercase tracking-wide text-white/40 mb-1">Token Product</p>
           <p className="text-sm font-semibold text-accent">{token_id || 'N/A'}</p>
+        </div>
+        <div>
+          <p className="text-xs uppercase tracking-wide text-white/40 mb-1">BIC</p>
+          <p className="text-sm font-semibold text-white/80">{bic || 'N/A'}</p>
         </div>
       </div>
 
@@ -850,6 +870,10 @@ const ApprovedCustomerCard = ({ customer }) => {
             <span className="text-white/60">Approved:</span>
             <span className="text-white/80">{approvalDate}</span>
           </div>
+          <div className="flex justify-between items-start">
+            <span className="text-white/60">KYC Ref:</span>
+            <span className="text-white/80 font-mono">{kyc_ref || 'N/A'}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -860,7 +884,13 @@ const ApprovedCustomerCard = ({ customer }) => {
 const ApprovedFundRequestCard = ({ fundRequest }) => {
   const {
     request_id,
+    msg_id,
     RequestID,
+    MsgID,
+    customer_ref,
+    CustomerRef,
+    customer_id,
+    CustomerID,
     requested_by,
     RequestedBy,
     name,
@@ -869,6 +899,10 @@ const ApprovedFundRequestCard = ({ fundRequest }) => {
     TokenID,
     amount,
     Amount,
+    currency,
+    Currency,
+    kyc_ref,
+    KycRef,
     kyc_status,
     KYCStatus,
     approved_at,
@@ -877,17 +911,19 @@ const ApprovedFundRequestCard = ({ fundRequest }) => {
     CreatedAt
   } = fundRequest;
 
-  const requestId = request_id || RequestID || 'N/A';
-  const customerId = requested_by || RequestedBy || 'N/A';
+  const requestId = request_id || RequestID || msg_id || MsgID || 'N/A';
+  const customerId = customer_ref || CustomerRef || customer_id || CustomerID || requested_by || RequestedBy || 'N/A';
   const fundAmount = amount || Amount || 0;
   const tokenId = token_id || TokenID || 'N/A';
+  const currencyCode = currency || Currency || 'USD';
   const kycDisplay = formatKycStatus(kyc_status || KYCStatus || 'false');
   const approvalDate = formatDate(approved_at || ApprovedAt || created_at || CreatedAt);
   const requestIdDisplay = truncateId(requestId);
   const customerIdDisplay = truncateId(customerId);
+  const kycRef = kyc_ref || KycRef || 'N/A';
   const amountDisplay = new Intl.NumberFormat('en-US', {
     style: 'currency',
-    currency: 'USD'
+    currency: currencyCode
   }).format(fundAmount);
 
   return (
@@ -949,6 +985,12 @@ const ApprovedFundRequestCard = ({ fundRequest }) => {
           </span>
         </div>
 
+        {/* KYC Ref */}
+        <div>
+          <p className="text-xs uppercase text-white/40 mb-1">KYC Ref</p>
+          <p className="text-white/80 text-xs">{truncateId(kycRef, 22)}</p>
+        </div>
+
         {/* Approved Date */}
         <div>
           <p className="text-xs uppercase text-white/40 mb-1">Approved</p>
@@ -1002,10 +1044,10 @@ const ApprovalTable = ({ title, subtitle, fetchUrl, approveUrl, rejectUrl, colum
   }, [latestRegistration, fetchUrl]);
 
   const handleAction = async (item, decision) => {
-    setProcessingId(item.key || item.request_id || item.RequestID);
+    setProcessingId(item.key || item.msg_id || item.MsgID || item.request_id || item.RequestID);
     try {
       const url = decision === 'approved' ? approveUrl : rejectUrl;
-      const finalUrl = url.replace(':requestId', item.request_id || item.RequestID);
+      const finalUrl = url.replace(':requestId', item.msg_id || item.MsgID || item.request_id || item.RequestID);
 
       const payload = mapRequestToFields ? mapRequestToFields(item, decision, latestRegistration) : {};
 
@@ -1068,7 +1110,7 @@ const ApprovalTable = ({ title, subtitle, fetchUrl, approveUrl, rejectUrl, colum
                         disabled={!!processingId}
                         className="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 text-xs font-medium disabled:opacity-50"
                       >
-                        {processingId === (item.request_id || item.RequestID) ? '...' : 'Approve'}
+                        {processingId === (item.msg_id || item.MsgID || item.request_id || item.RequestID) ? '...' : 'Approve'}
                       </button>
                     </div>
                   </td>
@@ -1357,6 +1399,7 @@ const BankDashboard = () => {
     transactions: 0
   });
   const [walletSnapshot, setWalletSnapshot] = useState({ loading: false, data: null, error: '' });
+  const [showWalletView, setShowWalletView] = useState(false);
   const [tokenConfigs, setTokenConfigs] = useState([]);
   const [ownedTokens, setOwnedTokens] = useState([]);
   const [ownedTokensLoading, setOwnedTokensLoading] = useState(false);
@@ -1881,6 +1924,28 @@ const BankDashboard = () => {
           <div>
             <p className="text-xs uppercase tracking-wide text-white/40">Wallet</p>
           </div>
+
+          <div className="flex justify-end">
+            <button
+              onClick={() => setShowWalletView(prev => !prev)}
+              className={`px-3 py-2 rounded-lg text-xs font-semibold border transition ${
+                showWalletView
+                  ? 'bg-accent text-slate-900 border-accent'
+                  : 'bg-white/10 text-white/80 border-white/20 hover:bg-white/15'
+              }`}
+            >
+              {showWalletView ? 'HIDE VIEW' : 'VIEW FULL DATA'}
+            </button>
+          </div>
+
+          {showWalletView && (
+            <div className="rounded-xl border border-white/15 bg-slate-950/80 p-3">
+              <p className="text-[11px] uppercase tracking-wide text-white/50 mb-2 font-semibold">Wallet Raw View</p>
+              <pre className="text-[11px] leading-5 text-indigo-100 whitespace-pre-wrap break-all m-0">
+                {JSON.stringify(walletSnapshot.data, null, 2)}
+              </pre>
+            </div>
+          )}
 
           <div className="space-y-4">
             <div>

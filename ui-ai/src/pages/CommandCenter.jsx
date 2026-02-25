@@ -155,15 +155,14 @@ const truncateId = (id, length = 30) => {
 
 // Customer Registration Card Component
 const CustomerRegistrationCard = ({ registration, onApprove, onReject, isLoading }) => {
-  const {
-    request_id,
-    name,
-    kyc_id,
-    kyc_status,
-    created_at,
-    status,
-    token_id
-  } = registration;
+  const request_id = registration.request_id || registration.msg_id || registration.RequestID || registration.MsgID || '';
+  const name = registration.name || registration.customer_ref || registration.CustomerRef || 'Customer';
+  const kyc_id = registration.kyc_id || registration.kyc_ref || registration.KycRef || '';
+  const kyc_status = registration.kyc_status || registration.KycStatus || '';
+  const created_at = registration.created_at || registration.CreatedAt || '';
+  const status = registration.status || registration.Status || '';
+  const token_id = registration.token_id || registration.TokenID || '';
+  const expires_at = registration.expires_at || registration.ExpiresAt || '';
 
   const statusBadge = status === 'PENDING' ? '🟡 Pending Approval' : status;
   const kycDisplay = formatKycStatus(kyc_status);
@@ -224,6 +223,10 @@ const CustomerRegistrationCard = ({ registration, onApprove, onReject, isLoading
       <div>
         <p className="text-xs uppercase tracking-wide text-white/40 mb-1">Requested On</p>
         <p className="text-sm text-white/80">{dateDisplay}</p>
+      </div>
+      <div>
+        <p className="text-xs uppercase tracking-wide text-white/40 mb-1">Expires At</p>
+        <p className="text-sm text-white/80">{formatDate(expires_at)}</p>
       </div>
 
       <div className="flex gap-3 pt-2">

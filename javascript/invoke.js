@@ -35,12 +35,19 @@ async function submitRegistration(name, country) {
     gateway.disconnect();
 }
 
-async function requestTokenRequest(name, networkAddress, country, currency) {
+async function requestTokenRequest(institutionID, institutionName, countryCode, currencyCode, reference) {
     const { gateway, contract } = await connect();
-    if (!currency || !currency.trim()) {
-        throw new Error('currency is required');
+    if (!currencyCode || !currencyCode.trim()) {
+        throw new Error('currency_code is required');
     }
-    await contract.submitTransaction('RequestTokenRequest', name, networkAddress, country, currency);
+    await contract.submitTransaction(
+        'RequestTokenRequest',
+        institutionID,
+        institutionName,
+        countryCode,
+        currencyCode,
+        reference
+    );
     console.log('RequestTokenRequest transaction has been submitted');
     gateway.disconnect();
 }
@@ -158,15 +165,13 @@ async function listApprovedParticipantMintRequests(networkAddress) {
 }
 
 // CUSTOMER-TO-TOKEN-TO-CUSTOMER TRANSFER FUNCTIONS
-async function createCustomerToTokenTransferRequest(senderNetworkAddress, senderTokenID, receiverTokenID, receiverCustomerNetworkAddress, amount, commissionAmount) {
+async function createCustomerToTokenTransferRequest(senderNetworkAddress, receiverCustomerRef, receiverBIC, amount) {
     const { gateway, contract } = await connect();
     const transferID = await contract.submitTransaction('CreateCustomerToTokenTransferRequest', 
         senderNetworkAddress, 
-        senderTokenID, 
-        receiverTokenID, 
-        receiverCustomerNetworkAddress, 
-        amount.toString(),
-        commissionAmount.toString()
+        receiverCustomerRef, 
+        receiverBIC, 
+        amount.toString()
     );
     console.log('CreateCustomerToTokenTransferRequest transaction submitted:', transferID.toString());
     gateway.disconnect();

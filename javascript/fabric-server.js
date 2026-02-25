@@ -38,29 +38,45 @@ const {
     listApprovedCustomers,
     listAllApprovedCustomers,
     approveCustomerRegistration,
+    rejectCustomerRegistration,
     customerRequestMint,
     viewPendingCustomerMintRequests,
     approveCustomerMint,
+    rejectCustomerMint,
     viewCustomerWallet,
+    probeCustomerTokenIDByWallet,
     getCustomerIDAccess,
+    getCustomerTokenApprovalStatus,
+    getMyCustomerAccounts,
+    getCustomerTokenWalletDetails,
 
     createTransferRequest,
     createTokenTransferRequest,
     createCustomerToTokenTransferRequest,
+    requestCustomerTransfer,
     viewPendingTokenTransferRequests,
     viewPendingCustomerToTokenTransfersAsSender,
     viewPendingCustomerToTokenTransfersAsReceiver,
     getCustomerToTokenTransferHistory,
     getCustomerToTokenTransferHistoryByCustomer,
+    getRejectedByReason,
+    getRejectedByBank,
+    getExpiredEscrowReturns,
     approveSenderTokenTransfer,
+    rejectSenderPreEscrow,
     approveReceiverTokenTransfer,
+    rejectReceiver,
     approveTokenTransferRequest,
     approveTokenTransferRequestWithFX,
     listTokenToTokenTransferHistory,
     listParticipantTransferHistory,
     listAllParticipantTransferHistory,
     listParticipantTransfersByID,
+    getSenderRecords,
+    getReceiverRecords,
+    totalVolumeByBIC,
     listApprovedParticipantMintRequests,
+    listTokenMintRecords,
     
 
     updateExchangeRate,
@@ -301,6 +317,18 @@ cleanupKYCDirectories();
 
 const BANK_TOKEN_CONFIG_PATH = path.join(__dirname, 'bank-token-configs.json');
 let BANK_TOKEN_CONFIG_CACHE = null;
+const CUSTOMER_ASSIGNED_TOKENS_CACHE = new Map();
+const CUSTOMER_ASSIGNED_TOKENS_CACHE_TTL_MS = 20000;
+const CUSTOMER_TOKEN_DERIVATION_CACHE = new Map();
+const CUSTOMER_ENDPOINT_DEGRADE_CACHE = new Map();
+const CUSTOMER_TOKEN_DERIVATION_TTL_MS = 60000;
+const CUSTOMER_ENDPOINT_DEGRADE_TTL_MS = 60000;
+const CUSTOMER_ACCOUNTS_CACHE = new Map();
+const CUSTOMER_ACCOUNTS_INFLIGHT = new Map();
+const CUSTOMER_ACCOUNTS_CACHE_TTL_MS = 20000;
+const CUSTOMER_APPROVAL_CACHE = new Map();
+const CUSTOMER_APPROVAL_INFLIGHT = new Map();
+const CUSTOMER_APPROVAL_CACHE_TTL_MS = 20000;
 
 if (!fs.existsSync(BANK_TOKEN_CONFIG_PATH)) {
     fs.writeFileSync(BANK_TOKEN_CONFIG_PATH, JSON.stringify({}, null, 2));
@@ -396,6 +424,59 @@ function listSanitizedBankTokenConfigs() {
     return Object.values(cache)
         .map(sanitizeBankTokenConfig)
         .filter(Boolean);
+}
+
+function getKnownTokenCandidates() {
+    const fromConfig = Object.keys(ensureBankTokenConfigCache() || {})
+        .map(k => String(k || '').trim())
+        .filter(Boolean);
+    const defaults = Array.from({ length: 30 }, (_v, i) => `token_${i + 1}`);
+    return Array.from(new Set([...fromConfig, ...defaults]));
+}
+
+function isSchemaMismatchError(error) {
+    const msg = String(error?.message || '').toLowerCase();
+    return msg.includes('did not match schema') || msg.includes('additional property') || msg.includes('is required');
+}
+
+function markEndpointDegraded(key, ttlMs = CUSTOMER_ENDPOINT_DEGRADE_TTL_MS) {
+    if (!key) return;
+    CUSTOMER_ENDPOINT_DEGRADE_CACHE.set(String(key), Date.now() + Math.max(1000, Number(ttlMs) || CUSTOMER_ENDPOINT_DEGRADE_TTL_MS));
+}
+
+function isEndpointDegraded(key) {
+    if (!key) return false;
+    const expiry = CUSTOMER_ENDPOINT_DEGRADE_CACHE.get(String(key));
+    if (!expiry) return false;
+    if (Date.now() > expiry) {
+        CUSTOMER_ENDPOINT_DEGRADE_CACHE.delete(String(key));
+        return false;
+    }
+    return true;
+}
+
+async function getCustomerTokenApprovalStatusCached(networkAddress, tokenID, walletPath, caller) {
+    const key = `${String(caller || '').trim()}::${String(networkAddress || '').trim()}::${String(tokenID || '').trim()}`;
+    const now = Date.now();
+    const cached = CUSTOMER_APPROVAL_CACHE.get(key);
+    if (cached && (now - cached.at) < CUSTOMER_APPROVAL_CACHE_TTL_MS) {
+        return cached.value || {};
+    }
+    if (CUSTOMER_APPROVAL_INFLIGHT.has(key)) {
+        return CUSTOMER_APPROVAL_INFLIGHT.get(key);
+    }
+
+    const loader = (async () => {
+        const value = await getCustomerTokenApprovalStatus(networkAddress, tokenID, walletPath, caller);
+        CUSTOMER_APPROVAL_CACHE.set(key, { at: Date.now(), value: value || {} });
+        return value || {};
+    })();
+    CUSTOMER_APPROVAL_INFLIGHT.set(key, loader);
+    try {
+        return await loader;
+    } finally {
+        CUSTOMER_APPROVAL_INFLIGHT.delete(key);
+    }
 }
 
 function interpretKYCStatus(status) {
@@ -741,6 +822,351 @@ function normalizeTokenIdentifier(identifier) {
     return identifier;
 }
 
+function normalizeMintRequestRecord(req = {}) {
+    const normalizedStatus = String(req.status || req.Status || '').trim().toUpperCase();
+    return {
+        ...req,
+        request_id: req.request_id || req.RequestID || req.msg_id || req.MsgID || '',
+        msg_id: req.msg_id || req.MsgID || req.request_id || req.RequestID || '',
+        customer_ref: req.customer_ref || req.CustomerRef || req.customer_id || req.CustomerID || req.customerId || req.requested_by || '',
+        customer_id: req.customer_id || req.CustomerID || req.customerId || req.customer_ref || req.CustomerRef || req.requested_by_name || req.requested_by || '',
+        name: req.name || req.customer_name || req.customer_ref || req.CustomerRef || '',
+        kyc_ref: req.kyc_ref || req.KycRef || req.kyc_id || req.KycId || req.kycId || '',
+        kyc_id: req.kyc_id || req.KycId || req.kycId || req.kyc_ref || req.KycRef || '',
+        kyc_status: req.kyc_status || req.kycStatus || req.KycStatus || '',
+        token_id: req.token_id || req.TokenID || req.tokenId || req.tokenID || '',
+        currency: req.currency || req.Currency || '',
+        amount: req.amount ?? req.Amount ?? 0,
+        status: normalizedStatus || req.status || req.Status || '',
+        created_at: req.created_at || req.CreatedAt || '',
+        approved_at: req.approved_at || req.ApprovedAt || '',
+        expires_at: req.expires_at || req.ExpiresAt || '',
+        purpose: req.purpose || req.Purpose || '',
+        daily_limit_used: req.daily_limit_used ?? req.DailyLimitUsed ?? 0
+    };
+}
+
+function normalizeTokenMintRecord(record = {}) {
+    return {
+        ...record,
+        record_id: record.record_id || record.RecordID || record.request_id || record.RequestID || '',
+        msg_id: record.msg_id || record.MsgID || '',
+        request_id: record.request_id || record.RequestID || record.msg_id || record.MsgID || '',
+        bic: record.bic || record.BIC || '',
+        token_id: record.token_id || record.TokenID || '',
+        amount: Number(record.amount ?? record.Amount ?? 0),
+        currency: record.currency || record.Currency || '',
+        purpose: record.purpose || record.Purpose || '',
+        status: String(record.status || record.Status || '').trim().toUpperCase() || 'APPROVED',
+        created_at: record.created_at || record.CreatedAt || '',
+        approved_at: record.approved_at || record.ApprovedAt || '',
+        approved_by: record.approved_by || record.ApprovedBy || '',
+        customer_ref: record.customer_ref || record.CustomerRef || '',
+        customer_id: record.customer_id || record.CustomerID || '',
+        mint_category: record.mint_category || record.MintCategory || 'TOKEN_OWNER_MINT'
+    };
+}
+
+function normalizeTokenTransferRequestRecord(record = {}) {
+    const rawStatus = String(record.status || record.Status || '').trim().toUpperCase();
+    let status = rawStatus;
+    if (status === 'PENDINGRECEIVERAPPROVAL') status = 'PENDING';
+    if (status === 'COMPLETED') status = 'SETTLED';
+
+    const msgId =
+        record.msg_id ||
+        record.MsgID ||
+        record.request_id ||
+        record.RequestID ||
+        '';
+
+    const requestId =
+        record.request_id ||
+        record.RequestID ||
+        msgId ||
+        '';
+
+    return {
+        ...record,
+        msg_id: msgId,
+        request_id: requestId,
+        sender_bic: record.sender_bic || record.SenderBIC || '',
+        receiver_bic: record.receiver_bic || record.ReceiverBIC || '',
+        sender_token_id: record.sender_token_id || record.SenderTokenID || '',
+        receiver_token_id: record.receiver_token_id || record.ReceiverTokenID || '',
+        amount: Number(record.amount ?? record.Amount ?? 0),
+        currency: record.currency || record.Currency || 'INR',
+        exchange_rate: Number(record.exchange_rate ?? record.ExchangeRate ?? 1),
+        purpose: record.purpose || record.Purpose || 'INTERBANK_SETTLEMENT',
+        status: status || 'PENDING',
+        created_at: record.created_at || record.CreatedAt || '',
+        expires_at: record.expires_at || record.ExpiresAt || '',
+        settled_at: record.settled_at || record.SettledAt || record.completed_at || record.CompletedAt || '',
+        completed_at: record.completed_at || record.CompletedAt || record.settled_at || record.SettledAt || ''
+    };
+}
+
+function normalizeTokenTransferHistoryRecord(record = {}) {
+    const txRef =
+        record.tx_ref ||
+        record.TxRef ||
+        record.record_id ||
+        record.RecordID ||
+        record.request_id ||
+        record.RequestID ||
+        '';
+
+    const msgId =
+        record.msg_id ||
+        record.MsgID ||
+        record.request_id ||
+        record.RequestID ||
+        '';
+
+    const settledAt =
+        record.settled_at ||
+        record.SettledAt ||
+        record.approved_at ||
+        record.ApprovedAt ||
+        '';
+
+    const status = String(record.status || record.Status || 'SETTLED').trim().toUpperCase();
+    const amount = Number(record.amount ?? record.Amount ?? 0);
+    const feeAmount = Number(record.fee_amount ?? record.FeeAmount ?? 0);
+    const netAmount = Number(record.net_amount ?? record.NetAmount ?? (amount - feeAmount));
+
+    return {
+        ...record,
+        tx_ref: txRef,
+        msg_id: msgId,
+        request_id: record.request_id || record.RequestID || msgId || txRef || '',
+        sender_bic: record.sender_bic || record.SenderBIC || '',
+        receiver_bic: record.receiver_bic || record.ReceiverBIC || '',
+        sender_token_id: record.sender_token_id || record.SenderTokenID || '',
+        receiver_token_id: record.receiver_token_id || record.ReceiverTokenID || '',
+        amount,
+        currency: record.currency || record.Currency || 'INR',
+        exchange_rate: Number(record.exchange_rate ?? record.ExchangeRate ?? 1),
+        fee_amount: feeAmount,
+        net_amount: netAmount,
+        status,
+        settled_at: settledAt,
+        approved_at: record.approved_at || record.ApprovedAt || settledAt || '',
+        block_height: record.block_height || record.BlockHeight || '',
+        purpose: record.purpose || record.Purpose || ''
+    };
+}
+
+function normalizeParticipantTransferRecord(record = {}) {
+    const txRef =
+        record.tx_ref ||
+        record.TxRef ||
+        record.record_id ||
+        record.RecordID ||
+        '';
+
+    const requestMsgID =
+        record.request_msg_id ||
+        record.RequestMsgID ||
+        record.transfer_request_id ||
+        record.TransferRequestID ||
+        record.transfer_id ||
+        record.TransferID ||
+        '';
+
+    const settledAt =
+        record.settled_at ||
+        record.SettledAt ||
+        record.completed_at ||
+        record.CompletedAt ||
+        '';
+
+    const amount = Number(record.amount ?? record.Amount ?? 0);
+    const commission = Number(record.commission ?? record.Commission ?? 0);
+    const netAmount = Number(record.net_amount ?? record.NetAmount ?? (amount - commission));
+
+    return {
+        ...record,
+        tx_ref: txRef,
+        request_msg_id: requestMsgID,
+        sender_customer_ref:
+            record.sender_customer_ref ||
+            record.SenderCustomerRef ||
+            record.sender_participant_id ||
+            record.SenderParticipantID ||
+            '',
+        sender_bic: record.sender_bic || record.SenderBIC || '',
+        receiver_customer_ref:
+            record.receiver_customer_ref ||
+            record.ReceiverCustomerRef ||
+            record.receiver_participant_id ||
+            record.ReceiverParticipantID ||
+            '',
+        receiver_bic: record.receiver_bic || record.ReceiverBIC || '',
+        amount,
+        currency: record.currency || record.Currency || 'INR',
+        commission,
+        net_amount: netAmount,
+        exchange_rate: Number(record.exchange_rate ?? record.ExchangeRate ?? 1),
+        status: String(record.status || record.Status || 'SETTLED').trim().toUpperCase(),
+        settled_at: settledAt,
+        block_height: record.block_height || record.BlockHeight || '',
+
+        // Legacy aliases for existing UI readers
+        record_id: record.record_id || record.RecordID || txRef || '',
+        transfer_request_id: record.transfer_request_id || record.TransferRequestID || requestMsgID || '',
+        transfer_id: record.transfer_id || record.TransferID || requestMsgID || '',
+        sender_participant_id: record.sender_participant_id || record.SenderParticipantID || record.sender_customer_ref || record.SenderCustomerRef || '',
+        receiver_participant_id: record.receiver_participant_id || record.ReceiverParticipantID || record.receiver_customer_ref || record.ReceiverCustomerRef || '',
+        completed_at: settledAt
+    };
+}
+
+function normalizeCustomerToTokenTransferRecord(record = {}) {
+    const rawStatus = String(record.status || record.Status || '').trim().toUpperCase();
+    let status = rawStatus;
+    if (status === 'PENDINGSENDERTOKENAPPROVAL') status = 'PENDING_SENDER';
+    if (status === 'PENDINGRECEIVERTOKENAPPROVAL') status = 'PENDING_RECEIVER';
+    if (status === 'COMPLETED') status = 'SETTLED';
+    if (status === 'REJECTEDBYSENDEROWNER') status = 'REJECTED_SENDER_PRE_ESCROW';
+    if (status === 'REJECTEDBYRECEIVEROWNER' || status === 'REJECTED') status = 'REJECTED_RECEIVER';
+
+    const msgId = record.msg_id || record.MsgID || record.transfer_request_id || record.TransferRequestID || '';
+    const transferRequestId = record.transfer_request_id || record.TransferRequestID || msgId || '';
+    const senderCustomerRef = record.sender_customer_ref || record.SenderCustomerRef || record.sender_customer_token_id || record.SenderCustomerTokenID || record.sender_customer_id || record.SenderCustomerID || '';
+    const receiverCustomerRef = record.receiver_customer_ref || record.ReceiverCustomerRef || record.receiver_customer_token_id || record.ReceiverCustomerTokenID || record.receiver_customer_id || record.ReceiverCustomerID || '';
+    const amount = Number(record.amount ?? record.Amount ?? 0);
+    const escrowAmount = Number(record.escrow_amount ?? record.EscrowAmount ?? record.escrowed_amount ?? record.EscrowedAmount ?? amount);
+    const commissionPct =
+        Number(record.commission_pct ?? record.CommissionPct ?? 0) ||
+        (Number(record.commission_percentage ?? record.CommissionPercentage ?? 0) / 100);
+    const commissionAmount = Number(record.commission_amount ?? record.CommissionAmount ?? 0);
+    const netReceiverAmount = Number(
+        record.net_receiver_amount ??
+        record.NetReceiverAmount ??
+        record.receiver_customer_amount ??
+        record.ReceiverCustomerAmount ??
+        (amount - commissionAmount)
+    );
+    const settledAt = record.settled_at || record.SettledAt || record.completed_at || record.CompletedAt || '';
+    const rejectionReason = (record.rejection_reason || record.RejectionReason || '').toString().trim().toUpperCase();
+    const rejectedAt = record.rejected_at || record.RejectedAt || '';
+
+    return {
+        ...record,
+        msg_id: msgId,
+        transfer_request_id: transferRequestId,
+        sender_customer_ref: senderCustomerRef,
+        receiver_customer_ref: receiverCustomerRef,
+        sender_bic: record.sender_bic || record.SenderBIC || '',
+        receiver_bic: record.receiver_bic || record.ReceiverBIC || '',
+        sender_token_id: record.sender_token_id || record.SenderTokenID || '',
+        receiver_token_id: record.receiver_token_id || record.ReceiverTokenID || '',
+        amount,
+        currency: record.currency || record.Currency || record.sender_currency || record.SenderCurrency || 'INR',
+        status: status || 'PENDING_SENDER',
+        escrow_amount: escrowAmount,
+        escrowed_amount: Number(record.escrowed_amount ?? record.EscrowedAmount ?? escrowAmount),
+        commission_pct: commissionPct,
+        commission_percentage: Number(record.commission_percentage ?? record.CommissionPercentage ?? (commissionPct * 100)),
+        commission_amount: commissionAmount,
+        net_receiver_amount: netReceiverAmount,
+        receiver_customer_amount: Number(record.receiver_customer_amount ?? record.ReceiverCustomerAmount ?? netReceiverAmount),
+        exchange_rate: Number(record.exchange_rate ?? record.ExchangeRate ?? 1),
+        created_at: record.created_at || record.CreatedAt || '',
+        settled_at: settledAt,
+        completed_at: record.completed_at || record.CompletedAt || settledAt || '',
+        rejection_reason: rejectionReason,
+        rejected_at: rejectedAt
+    };
+}
+
+function dedupeCustomerToTokenTransfers(records = []) {
+    const list = Array.isArray(records) ? records : [];
+    const byKey = new Map();
+
+    const score = item => {
+        let s = 0;
+        if (item?.settled_at || item?.completed_at) s += 3;
+        if (item?.rejected_at) s += 2;
+        if (item?.sender_customer_token_id) s += 1;
+        if (item?.receiver_customer_token_id) s += 1;
+        if (item?.created_at) s += 1;
+        return s;
+    };
+
+    for (const raw of list) {
+        const item = normalizeCustomerToTokenTransferRecord(raw);
+        const key = String(
+            item.transfer_request_id ||
+            item.msg_id ||
+            `${item.sender_customer_ref || ''}_${item.receiver_customer_ref || ''}_${item.amount || 0}_${item.created_at || ''}`
+        ).trim();
+        if (!key) continue;
+
+        const existing = byKey.get(key);
+        if (!existing || score(item) >= score(existing)) {
+            byKey.set(key, item);
+        }
+    }
+
+    return Array.from(byKey.values());
+}
+
+function normalizeParticipantRecord(record = {}) {
+    const normalizedStatus = String(
+        record.status ||
+        record.Status ||
+        (record.approved || record.Approved ? 'ACTIVE' : 'PENDING')
+    ).trim().toUpperCase();
+
+    const networkAddress =
+        record.network_address ||
+        record.NetworkAddress ||
+        record.customer_ref ||
+        record.CustomerRef ||
+        '';
+
+    const customerRef =
+        record.customer_ref ||
+        record.CustomerRef ||
+        record.customer_id ||
+        record.CustomerID ||
+        networkAddress ||
+        '';
+
+    const customerId =
+        record.customer_id ||
+        record.CustomerID ||
+        record.customerId ||
+        customerRef ||
+        '';
+
+    return {
+        ...record,
+        customer_ref: customerRef,
+        customer_id: customerId,
+        network_address: networkAddress,
+        token_id: record.token_id || record.TokenID || '',
+        bic: record.bic || record.BIC || '',
+        kyc_ref: record.kyc_ref || record.KycRef || record.kyc_id || record.KycId || record.kycId || '',
+        kyc_id: record.kyc_id || record.KycId || record.kycId || record.kyc_ref || record.KycRef || '',
+        kyc_status: record.kyc_status || record.KycStatus || '',
+        status: normalizedStatus,
+        activated_at: record.activated_at || record.ActivatedAt || record.approved_at || record.ApprovedAt || '',
+        approved_at: record.approved_at || record.ApprovedAt || record.activated_at || record.ActivatedAt || '',
+        created_at: record.created_at || record.CreatedAt || '',
+        transfer_refs: Array.isArray(record.transfer_refs)
+            ? record.transfer_refs
+            : (Array.isArray(record.transfer_ids) ? record.transfer_ids : []),
+        transfer_ids: Array.isArray(record.transfer_ids)
+            ? record.transfer_ids
+            : (Array.isArray(record.transfer_refs) ? record.transfer_refs : []),
+        foreign_balances: record.foreign_balances || record.ForeignBalances || {},
+        foreign_currencies: record.foreign_currencies || record.ForeignCurrencies || {}
+    };
+}
+
 // Retry utility for handling MVCC_READ_CONFLICT and transient errors
 async function submitWithRetry(asyncFn, maxRetries = 3, context = '') {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -896,12 +1322,35 @@ function requireNetworkAddressForUser(userId, providedNetworkAddress) {
 }
 
 async function resolveCustomerTokenID(resolvedNetworkAddress, walletPath, callerUserId) {
-    const matchByAddress = list => (Array.isArray(list)
-        ? list.find(c =>
-            c.network_address === resolvedNetworkAddress ||
-            c.NetworkAddress === resolvedNetworkAddress ||
-            c.networkAddress === resolvedNetworkAddress)
+    const normalizedAddress = String(resolvedNetworkAddress || '').trim();
+    const extractTokenID = candidate => (candidate
+        ? (
+            candidate.token_id ||
+            candidate.tokenID ||
+            candidate.tokenId ||
+            candidate.token ||
+            candidate.TokenID
+        )
         : null);
+    const matchesCustomerIdentity = candidate => {
+        if (!candidate || !normalizedAddress) {
+            return false;
+        }
+        const refs = [
+            candidate.network_address,
+            candidate.NetworkAddress,
+            candidate.networkAddress,
+            candidate.customer_ref,
+            candidate.CustomerRef,
+            candidate.customer_id,
+            candidate.CustomerID,
+            candidate.customerId
+        ]
+            .map(value => (value == null ? '' : String(value).trim()))
+            .filter(Boolean);
+        return refs.includes(normalizedAddress);
+    };
+    const matchCustomer = list => (Array.isArray(list) ? list.find(matchesCustomerIdentity) : null);
 
     // OPTIMIZATION: Attempt 1 - Try participant wallet info (single connection as caller)
     try {
@@ -919,9 +1368,8 @@ async function resolveCustomerTokenID(resolvedNetworkAddress, walletPath, caller
     // OPTIMIZATION: Attempt 2 - Try approved customers as admin ONLY (limit to 1 admin connection)
     try {
         const list = await listAllApprovedCustomers(walletPath, 'admin');
-        const match = matchByAddress(list);
-        const customerToken =
-            match?.token_id || match?.tokenID || match?.tokenId || match?.token || match?.TokenID;
+        const match = matchCustomer(list);
+        const customerToken = extractTokenID(match);
         if (customerToken) {
             console.log('resolveCustomerTokenID: derived from approved customers (admin)', customerToken);
             return customerToken;
@@ -947,7 +1395,7 @@ async function resolveCustomerTokenID(resolvedNetworkAddress, walletPath, caller
                         continue;
                     }
                     const customers = await listApprovedCustomers(tokenId, owner, walletPath, ownerUserId);
-                    const match = matchByAddress(customers);
+                    const match = matchCustomer(customers);
                     if (match) {
                         console.log('resolveCustomerTokenID: derived from token owner lookup', tokenId);
                         return tokenId;
@@ -959,6 +1407,17 @@ async function resolveCustomerTokenID(resolvedNetworkAddress, walletPath, caller
         }
     } catch (tokenScanErr) {
         console.log('resolveCustomerTokenID: viewAllTokens fallback failed:', tokenScanErr?.message);
+    }
+
+    // FINAL FALLBACK: probe customer wallet against known token slots using caller identity.
+    try {
+        const probedToken = await probeCustomerTokenIDByWallet(resolvedNetworkAddress, walletPath, callerUserId, 25);
+        if (probedToken) {
+            console.log('resolveCustomerTokenID: derived from wallet probe fallback', probedToken);
+            return probedToken;
+        }
+    } catch (probeErr) {
+        console.log('resolveCustomerTokenID: wallet probe fallback failed:', probeErr?.message);
     }
 
     console.log('resolveCustomerTokenID: unable to derive token (customer may not be approved yet)');
@@ -987,10 +1446,43 @@ function getBankCallerContext(req) {
     return { userId, ownerNetworkAddress };
 }
 
+async function queryChaincode(walletPath, userId, channelName, contractName, transactionName, args = []) {
+    const { gateway, contract } = await connect(walletPath, userId);
+    try {
+        const result = await contract.evaluateTransaction(transactionName, ...(Array.isArray(args) ? args : []));
+        const payload = result.toString().trim();
+        if (!payload) return null;
+        try {
+            return JSON.parse(payload);
+        } catch (_err) {
+            return payload;
+        }
+    } finally {
+        try { gateway.disconnect(); } catch (_e) {}
+    }
+}
+
 async function getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress) {
     if (!walletPath || !userId || !ownerNetworkAddress) {
         return [];
     }
+
+    const normalizeToken = token => ({
+        ...token,
+        token_id: token?.token_id || token?.tokenID || token?.tokenId || token?.TokenID || '',
+        owner: token?.owner || token?.Owner || ownerNetworkAddress,
+        Owner: token?.owner || token?.Owner || ownerNetworkAddress
+    });
+
+    const buildSingleToken = tokenId => (tokenId
+        ? [{
+            token_id: tokenId,
+            tokenId,
+            TokenID: tokenId,
+            owner: ownerNetworkAddress,
+            Owner: ownerNetworkAddress
+        }]
+        : []);
 
     try {
         const strictAssigned = await queryChaincode(
@@ -1005,10 +1497,32 @@ async function getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress) {
             ? strictAssigned
             : (strictAssigned ? [strictAssigned] : []);
         if (strictTokens.length > 0) {
-            return strictTokens;
+            return strictTokens.map(normalizeToken).filter(t => t.token_id);
         }
     } catch (strictErr) {
         console.warn(`strict owner token lookup failed for ${userId}:`, strictErr?.message || strictErr);
+    }
+
+    // Fallback 1: direct owner->token mapping avoids schema issues in list methods.
+    try {
+        const directTokenId = String(await getTokenAccess(ownerNetworkAddress, walletPath, userId)).trim();
+        if (directTokenId) {
+            return buildSingleToken(directTokenId);
+        }
+    } catch (directErr) {
+        console.warn(`owner token access lookup failed for ${userId}:`, directErr?.message || directErr);
+    }
+
+    // Fallback 2: admin path for environments where bank identity cannot query access directly.
+    if (userId !== 'admin') {
+        try {
+            const adminTokenId = String(await getTokenAccess(ownerNetworkAddress, walletPath, 'admin')).trim();
+            if (adminTokenId) {
+                return buildSingleToken(adminTokenId);
+            }
+        } catch (adminAccessErr) {
+            console.warn(`admin owner token access fallback failed for ${userId}:`, adminAccessErr?.message || adminAccessErr);
+        }
     }
 
     // Backward-compatible fallback for older chaincode versions.
@@ -1016,11 +1530,345 @@ async function getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress) {
         const assigned = await listAssignedTokens(walletPath, userId);
         return (Array.isArray(assigned) ? assigned : []).filter(
             token => (token.owner || token.Owner) === ownerNetworkAddress
-        );
+        ).map(normalizeToken).filter(t => t.token_id);
     } catch (fallbackErr) {
         console.warn(`fallback owner token lookup failed for ${userId}:`, fallbackErr?.message || fallbackErr);
+    }
+
+    // Final fallback for mixed deployments: query all tokens and filter by owner.
+    try {
+        const allAsCaller = await viewAllTokens(walletPath, userId);
+        const filtered = (Array.isArray(allAsCaller) ? allAsCaller : [])
+            .filter(token => (token.owner || token.Owner) === ownerNetworkAddress)
+            .map(normalizeToken)
+            .filter(t => t.token_id);
+        if (filtered.length > 0) {
+            return filtered;
+        }
+    } catch (callerAllErr) {
+        console.warn(`viewAllTokens fallback failed for ${userId}:`, callerAllErr?.message || callerAllErr);
+    }
+
+    if (userId !== 'admin') {
+        try {
+            const allAsAdmin = await viewAllTokens(walletPath, 'admin');
+            return (Array.isArray(allAsAdmin) ? allAsAdmin : [])
+                .filter(token => (token.owner || token.Owner) === ownerNetworkAddress)
+                .map(normalizeToken)
+                .filter(t => t.token_id);
+        } catch (adminAllErr) {
+            console.warn(`admin viewAllTokens fallback failed for ${userId}:`, adminAllErr?.message || adminAllErr);
+        }
+    }
+
+    return [];
+}
+
+function isMissingContractFunctionError(error, fnName) {
+    const msg = String(error?.message || '');
+    if (!msg) return false;
+    return msg.includes(`Function ${fnName} not found`) || msg.includes(`function ${fnName} not found`);
+}
+
+async function getCustomerAccountsForDashboard(walletPath, caller, resolvedNetworkAddress) {
+    const cacheKey = `${String(caller || '').trim()}::${String(resolvedNetworkAddress || '').trim()}`;
+    const now = Date.now();
+    const cached = CUSTOMER_ACCOUNTS_CACHE.get(cacheKey);
+    if (cached && (now - cached.at) < CUSTOMER_ACCOUNTS_CACHE_TTL_MS) {
+        return Array.isArray(cached.accounts) ? cached.accounts : [];
+    }
+    if (CUSTOMER_ACCOUNTS_INFLIGHT.has(cacheKey)) {
+        return CUSTOMER_ACCOUNTS_INFLIGHT.get(cacheKey);
+    }
+
+    const loader = (async () => {
+    try {
+        const accounts = await getMyCustomerAccounts(walletPath, caller);
+        const normalized = Array.isArray(accounts) ? accounts : [];
+        CUSTOMER_ACCOUNTS_CACHE.set(cacheKey, { at: Date.now(), accounts: normalized });
+        return normalized;
+    } catch (error) {
+        if (!isMissingContractFunctionError(error, 'GetMyCustomerAccounts')) {
+            throw error;
+        }
+        console.warn(`GetMyCustomerAccounts not found for ${caller}; using compatibility fallback`);
+    }
+
+    // Compatibility path for older deployed chaincode packages.
+    const tokenIDs = new Set();
+    try {
+        const token = String(await getTokenAccess(resolvedNetworkAddress, walletPath, caller)).trim();
+        if (token) tokenIDs.add(token);
+    } catch (tokenErr) {
+        console.warn(`customer accounts fallback token access failed for ${caller}:`, tokenErr?.message || tokenErr);
+    }
+
+    try {
+        const derivedToken = String(await resolveCustomerTokenID(resolvedNetworkAddress, walletPath, caller) || '').trim();
+        if (derivedToken) tokenIDs.add(derivedToken);
+    } catch (resolveErr) {
+        console.warn(`customer accounts fallback resolveCustomerTokenID failed for ${caller}:`, resolveErr?.message || resolveErr);
+    }
+
+    // Probe known token IDs to capture multi-token customers (e.g., token_1 + token_2).
+    const configTokenCandidates = Object.keys(ensureBankTokenConfigCache() || {})
+        .map(token => String(token || '').trim())
+        .filter(Boolean);
+    const defaultTokenCandidates = ['token_1', 'token_2', 'token_3', 'token_4'];
+    const candidates = Array.from(new Set([...configTokenCandidates, ...defaultTokenCandidates])).slice(0, 8);
+    for (const candidate of candidates) {
+        try {
+            const approval = await getCustomerTokenApprovalStatusCached(resolvedNetworkAddress, candidate, walletPath, caller);
+            const tokenFromApproval = String(approval?.token_id || approval?.tokenID || '').trim();
+            const status = String(approval?.status || '').trim().toUpperCase();
+            const approved = Boolean(approval?.approved || status === 'APPROVED');
+            const isRegisteredState = status && !['NOT_REGISTERED', 'UNKNOWN', 'NONE'].includes(status);
+            if (tokenFromApproval || approved || isRegisteredState) {
+                tokenIDs.add(tokenFromApproval || candidate);
+            }
+        } catch (_probeErr) {
+            // Ignore per-token misses.
+        }
+    }
+
+    if (tokenIDs.size === 0) {
         return [];
     }
+
+    const accounts = [];
+    for (const tokenID of tokenIDs) {
+        let approval = {};
+        try {
+            approval = await getCustomerTokenApprovalStatusCached(resolvedNetworkAddress, tokenID, walletPath, caller);
+        } catch (approvalErr) {
+            console.warn(`customer accounts fallback approval lookup failed for ${caller} token=${tokenID}:`, approvalErr?.message || approvalErr);
+        }
+
+        const status = String(approval?.status || '').trim().toUpperCase();
+        const approved = Boolean(approval?.approved || status === 'APPROVED');
+        accounts.push({
+            customer_ref: approval?.customer_ref || approval?.customerRef || approval?.customer_id || approval?.customerID || resolvedNetworkAddress,
+            customer_id: approval?.customer_id || approval?.customerID || approval?.customer_ref || approval?.customerRef || resolvedNetworkAddress,
+            token_id: approval?.token_id || approval?.tokenID || tokenID,
+            bic: (approval?.bic || approval?.BIC || '').toString().trim().toUpperCase(),
+            approved,
+            status: status || (approved ? 'APPROVED' : 'PENDING'),
+            network_address: approval?.network_address || approval?.networkAddress || resolvedNetworkAddress
+        });
+    }
+
+    // Deduplicate by token_id
+    const seen = new Set();
+    return accounts.filter(account => {
+        const key = String(account?.token_id || '').trim();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+    })();
+
+    CUSTOMER_ACCOUNTS_INFLIGHT.set(cacheKey, loader);
+    try {
+        const resolved = await loader;
+        CUSTOMER_ACCOUNTS_CACHE.set(cacheKey, { at: Date.now(), accounts: resolved });
+        return resolved;
+    } finally {
+        CUSTOMER_ACCOUNTS_INFLIGHT.delete(cacheKey);
+    }
+}
+
+async function deriveCustomerAssignedTokens(walletPath, caller, resolvedNetworkAddress) {
+    const cacheKey = `${String(caller || '').trim()}::${String(resolvedNetworkAddress || '').trim()}`;
+    const now = Date.now();
+    const cached = CUSTOMER_ASSIGNED_TOKENS_CACHE.get(cacheKey);
+    if (cached && (now - cached.at) < CUSTOMER_ASSIGNED_TOKENS_CACHE_TTL_MS) {
+        return Array.isArray(cached.tokens) ? cached.tokens : [];
+    }
+
+    const discovered = [];
+    const seen = new Set();
+    const addToken = (tokenId, status = 'ACTIVE', source = 'approval_probe') => {
+        const normalized = String(tokenId || '').trim();
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        discovered.push({
+            token_id: normalized,
+            tokenId: normalized,
+            TokenID: normalized,
+            owner: resolvedNetworkAddress,
+            Owner: resolvedNetworkAddress,
+            status,
+            source
+        });
+    };
+
+    // Try account endpoint first (works on newer chaincode).
+    try {
+        const accounts = await getCustomerAccountsForDashboard(walletPath, caller, resolvedNetworkAddress);
+        for (const account of (Array.isArray(accounts) ? accounts : [])) {
+            addToken(account?.token_id || account?.tokenID || account?.tokenId || account?.TokenID, account?.status || 'ACTIVE', 'customer_accounts');
+        }
+    } catch (accountsErr) {
+        console.warn(`deriveCustomerAssignedTokens accounts lookup failed for ${caller}:`, accountsErr?.message || accountsErr);
+    }
+
+    if (discovered.length > 0) {
+        CUSTOMER_ASSIGNED_TOKENS_CACHE.set(cacheKey, { at: now, tokens: discovered });
+        return discovered;
+    }
+
+    // Fast fallback: reuse wallet token derivation logic before broad probing.
+    try {
+        const derivedToken = String(await resolveCustomerTokenID(resolvedNetworkAddress, walletPath, caller) || '').trim();
+        if (derivedToken) {
+            let approval = {};
+            try {
+                approval = await getCustomerTokenApprovalStatusCached(resolvedNetworkAddress, derivedToken, walletPath, caller);
+            } catch (_approvalErr) {}
+            const status = String(approval?.status || '').trim().toUpperCase() || 'APPROVED';
+            addToken(derivedToken, status, 'wallet_token_resolver');
+        }
+    } catch (resolveErr) {
+        console.warn(`deriveCustomerAssignedTokens resolveCustomerTokenID failed for ${caller}:`, resolveErr?.message || resolveErr);
+    }
+
+    if (discovered.length > 0) {
+        CUSTOMER_ASSIGNED_TOKENS_CACHE.set(cacheKey, { at: now, tokens: discovered });
+        return discovered;
+    }
+
+    // Compatibility fallback for older deployed chaincode: probe known token IDs using approval status.
+    const candidates = getKnownTokenCandidates().slice(0, 12);
+    let noisyProbeWarnings = 0;
+    for (const candidate of candidates) {
+        try {
+            const approval = await getCustomerTokenApprovalStatusCached(resolvedNetworkAddress, candidate, walletPath, caller);
+            const tokenFromApproval = String(approval?.token_id || approval?.tokenID || '').trim();
+            const status = String(approval?.status || '').trim().toUpperCase();
+            const approved = Boolean(approval?.approved || status === 'APPROVED');
+            const isRegisteredState = status && !['NOT_REGISTERED', 'UNKNOWN', 'NONE'].includes(status);
+            if (tokenFromApproval || approved || isRegisteredState) {
+                addToken(tokenFromApproval || candidate, status || 'APPROVED', 'approval_probe');
+            }
+        } catch (probeErr) {
+            // Ignore probe misses (expected for non-assigned tokens).
+            const msg = String(probeErr?.message || '').toLowerCase();
+            if (!(msg.includes('not found') || msg.includes('missing') || msg.includes('not approved'))) {
+                if (noisyProbeWarnings < 2) {
+                    console.warn(`deriveCustomerAssignedTokens probe warning for ${caller} token=${candidate}:`, probeErr?.message || probeErr);
+                }
+                noisyProbeWarnings += 1;
+            }
+        }
+    }
+
+    CUSTOMER_ASSIGNED_TOKENS_CACHE.set(cacheKey, { at: now, tokens: discovered });
+    return discovered;
+}
+
+async function getCustomerTokenWalletDetailsForDashboard(customerRef, tokenID, networkAddress, walletPath, caller) {
+    try {
+        return await getCustomerTokenWalletDetails(customerRef, tokenID, walletPath, caller);
+    } catch (error) {
+        if (!isMissingContractFunctionError(error, 'GetCustomerTokenWallet')) {
+            throw error;
+        }
+        console.warn(`GetCustomerTokenWallet not found for ${caller}; using compatibility fallback`);
+    }
+
+    // Compatibility path: build wallet payload from existing wallet + approval functions.
+    let walletInfo = {};
+    try {
+        if (tokenID) {
+            const customerWallet = await viewCustomerWallet(networkAddress, tokenID, walletPath, caller);
+            if (customerWallet && typeof customerWallet === 'object') {
+                walletInfo = customerWallet.wallet || customerWallet;
+            }
+        }
+    } catch (customerWalletErr) {
+        console.warn(`compat wallet fallback viewCustomerWallet failed for ${caller}:`, customerWalletErr?.message || customerWalletErr);
+    }
+
+    try {
+        if (!walletInfo || Object.keys(walletInfo).length === 0) {
+            walletInfo = await getWalletInfo(networkAddress, walletPath, caller);
+        }
+    } catch (walletErr) {
+        console.warn(`compat wallet fallback getWalletInfo failed for ${caller}:`, walletErr?.message || walletErr);
+    }
+
+    let approval = {};
+    try {
+        approval = await getCustomerTokenApprovalStatusCached(networkAddress, tokenID, walletPath, caller);
+    } catch (approvalErr) {
+        console.warn(`compat wallet fallback approval lookup failed for ${caller}:`, approvalErr?.message || approvalErr);
+    }
+
+    let tokenMeta = {};
+    const effectiveTokenID =
+        approval?.token_id ||
+        approval?.tokenID ||
+        walletInfo?.tokenID ||
+        walletInfo?.token_id ||
+        tokenID ||
+        '';
+    try {
+        if (effectiveTokenID) {
+            tokenMeta = await getTokenByID(walletPath, caller, effectiveTokenID);
+        }
+    } catch (tokenErr) {
+        console.warn(`compat wallet fallback getTokenByID failed for ${caller}:`, tokenErr?.message || tokenErr);
+    }
+
+    const approved = Boolean(approval?.approved || String(approval?.status || '').trim().toUpperCase() === 'APPROVED');
+    const registrationStatus = String(approval?.status || (approved ? 'APPROVED' : 'PENDING')).trim().toUpperCase();
+    const nowIso = new Date().toISOString();
+    const mergedBIC =
+        walletInfo?.bic ||
+        walletInfo?.bic_code ||
+        walletInfo?.BIC ||
+        approval?.bic ||
+        approval?.BIC ||
+        tokenMeta?.bic ||
+        tokenMeta?.BIC ||
+        '';
+    const mergedCurrency =
+        walletInfo?.currency ||
+        walletInfo?.Currency ||
+        tokenMeta?.currency ||
+        tokenMeta?.Currency ||
+        '';
+    const mergedBalance =
+        walletInfo?.wallet_balance ??
+        walletInfo?.balance ??
+        walletInfo?.availableBalance ??
+        tokenMeta?.minted ??
+        tokenMeta?.Minted ??
+        0;
+
+    return {
+        wallet: {
+            ...walletInfo,
+            customerRef: approval?.customer_ref || approval?.customerRef || customerRef || networkAddress,
+            customerID: approval?.customer_id || approval?.customerID || customerRef || networkAddress,
+            tokenID: effectiveTokenID,
+            networkAddress: networkAddress,
+            bic: mergedBIC,
+            bic_code: mergedBIC,
+            currency: mergedCurrency,
+            currencySymbol: currencySymbol(mergedCurrency),
+            wallet_balance: Number(mergedBalance || 0),
+            balance: Number(mergedBalance || 0),
+            availableBalance: Number(mergedBalance || 0),
+            registration: {
+                status: registrationStatus,
+                approved: approved,
+                approved_at: approval?.approved_at || approval?.approvedAt || approval?.activated_at || approval?.activatedAt || '',
+                activated_at: approval?.activated_at || approval?.activatedAt || approval?.approved_at || approval?.approvedAt || '',
+                created_at: approval?.created_at || approval?.createdAt || approval?.requested_at || approval?.requestedAt || nowIso
+            }
+        }
+    };
 }
 
 async function ensureTokenPoolInitialized(walletPath) {
@@ -2223,6 +3071,16 @@ app.get('/api/customer/wallet', async (req, res) => {
         if (!effectiveTokenID) {
             console.log('Token not provided; attempting derivation...');
             try {
+                const tokenCacheKey = `${custumerUserId}::${resolvedNetworkAddress}`;
+                const cachedDerived = CUSTOMER_TOKEN_DERIVATION_CACHE.get(tokenCacheKey);
+                if (cachedDerived && (Date.now() - cachedDerived.at) < CUSTOMER_TOKEN_DERIVATION_TTL_MS) {
+                    effectiveTokenID = cachedDerived.tokenID || '';
+                }
+            } catch (_cacheErr) {}
+        }
+
+        if (!effectiveTokenID) {
+            try {
                 // SECURITY FIX #8: Add timeout to token resolution (5 second max)
                 const derivationPromise = resolveCustomerTokenID(resolvedNetworkAddress, walletPath, custumerUserId);
                 const timeoutPromise = new Promise((_, reject) => 
@@ -2231,6 +3089,10 @@ app.get('/api/customer/wallet', async (req, res) => {
                 const derivedToken = await Promise.race([derivationPromise, timeoutPromise]);
                 if (derivedToken) {
                     effectiveTokenID = derivedToken;
+                    CUSTOMER_TOKEN_DERIVATION_CACHE.set(
+                        `${custumerUserId}::${resolvedNetworkAddress}`,
+                        { at: Date.now(), tokenID: derivedToken }
+                    );
                     console.log('Token resolved via derivation:', derivedToken);
                 }
             } catch (deriveErr) {
@@ -2252,7 +3114,7 @@ app.get('/api/customer/wallet', async (req, res) => {
                     registration: {
                         status: 'no_token_assigned',
                         message: 'Customer registered; token assignment/approval is pending.',
-                        created_at: new Date().toISOString()
+                        created_at: ''
                     },
                     network_address: resolvedNetworkAddress,
                     token_id: null
@@ -2294,7 +3156,7 @@ app.get('/api/customer/wallet', async (req, res) => {
                         registration: {
                             status: 'not_registered',
                             message: 'Customer not found on-chain. Register the customer and await approval.',
-                            created_at: new Date().toISOString()
+                            created_at: ''
                         },
                         network_address: resolvedNetworkAddress,
                         token_id: effectiveTokenID
@@ -2313,7 +3175,7 @@ app.get('/api/customer/wallet', async (req, res) => {
                         registration: {
                             status: 'no_token_assigned',
                             message: 'Customer registered; token assignment/approval is pending.',
-                            created_at: new Date().toISOString()
+                            created_at: ''
                         },
                         network_address: resolvedNetworkAddress,
                         token_id: effectiveTokenID
@@ -2392,23 +3254,45 @@ app.get('/api/customer/wallet', async (req, res) => {
                     : null),
             registration: {
                 status: registrationStatus,
-                created_at: new Date().toISOString()
+                created_at:
+                    walletData.created_at ||
+                    walletData.CreatedAt ||
+                    walletData.activated_at ||
+                    walletData.ActivatedAt ||
+                    walletData.approved_at ||
+                    walletData.ApprovedAt ||
+                    '',
+                approved_at:
+                    walletData.approved_at ||
+                    walletData.ApprovedAt ||
+                    walletData.activated_at ||
+                    walletData.ActivatedAt ||
+                    '',
+                activated_at:
+                    walletData.activated_at ||
+                    walletData.ActivatedAt ||
+                    walletData.approved_at ||
+                    walletData.ApprovedAt ||
+                    ''
             },
             token_id: walletData.tokenID || effectiveTokenID,
             network_address: walletData.networkAddress || networkAddress,
-            customer_id: walletData.customerID || walletData.customer_id || null,
-            participant_transfer_id: walletData.participantTransferID || walletData.participant_transfer_id || null,
-            token_transfer_id: walletData.tokenTransferID || walletData.token_transfer_id || null,
+            customer_id: walletData.customerID || walletData.customer_id || walletData.customerRef || walletData.customer_ref || networkAddress || '',
+            customer_ref: walletData.customerRef || walletData.customer_ref || walletData.customerID || walletData.customer_id || networkAddress || '',
+            bic: (walletData.bic || walletData.bic_code || walletData.BIC || '').toString().trim().toUpperCase(),
+            bic_code: (walletData.bic_code || walletData.bic || walletData.BIC || '').toString().trim().toUpperCase(),
+            participant_transfer_id: walletData.participantTransferID || walletData.participant_transfer_id || '',
+            token_transfer_id: walletData.tokenTransferID || walletData.token_transfer_id || '',
             participant_transfer_ids: participantTransferIDs,
             token_transfer_ids: tokenTransferIDs,
-            currency: normalizedCurrency,
+            currency: normalizedCurrency || '',
             currency_symbol: currencySymbol,
             balance_display:
                 walletData.balanceDisplay ||
                 walletData.balance_display ||
                 (currencySymbol && typeof walletData.balance === 'number'
                     ? `${currencySymbol}${walletData.balance.toFixed(2)}`
-                    : null)
+                    : `${currencySymbol || ''}${walletBalanceValue.toFixed(2)}`)
         };
 
         res.json({
@@ -2418,6 +3302,130 @@ app.get('/api/customer/wallet', async (req, res) => {
     } catch (error) {
         console.error('Wallet error:', error);
         res.status(500).json({
+            success: false,
+            detail: error.message
+        });
+    }
+});
+
+// Customer dashboard account list endpoint.
+app.get('/api/customer/accounts', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const requestedUserId = (req.query.userId || '').trim();
+        const networkAddress = req.query.networkAddress;
+
+        if (!caller) {
+            return res.status(401).json({
+                success: false,
+                detail: 'Authentication required'
+            });
+        }
+        if (requestedUserId && requestedUserId !== caller) {
+            return res.status(403).json({
+                success: false,
+                detail: 'Forbidden: cannot query another user accounts'
+            });
+        }
+
+        // SECURITY: use server-side registered address and validate caller-provided value if present.
+        const resolvedNetworkAddress = requireNetworkAddressForUser(caller, networkAddress);
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const accounts = await getCustomerAccountsForDashboard(walletPath, caller, resolvedNetworkAddress);
+
+        const normalized = (Array.isArray(accounts) ? accounts : [])
+            .filter(account => String(account?.token_id || account?.tokenID || '').trim())
+            .map(account => ({
+                customer_ref: account?.customer_ref || account?.customer_id || resolvedNetworkAddress,
+                customer_id: account?.customer_id || account?.customer_ref || resolvedNetworkAddress,
+                token_id: account?.token_id || account?.tokenID || '',
+                bic: (account?.bic || '').toString().trim().toUpperCase(),
+                approved: Boolean(account?.approved),
+                status: String(account?.status || (account?.approved ? 'APPROVED' : 'PENDING_APPROVAL')).trim().toUpperCase()
+            }));
+
+        return res.json({
+            success: true,
+            network_address: resolvedNetworkAddress,
+            accounts: normalized
+        });
+    } catch (error) {
+        console.error('Customer accounts list error:', error);
+        return res.status(500).json({
+            success: false,
+            detail: error.message
+        });
+    }
+});
+
+// Customer selected account wallet endpoint.
+app.get('/api/customer/accounts/:customerRef/:tokenID', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const requestedUserId = (req.query.userId || '').trim();
+        const networkAddress = req.query.networkAddress;
+        const customerRef = decodeURIComponent(req.params.customerRef || '').trim();
+        const tokenID = decodeURIComponent(req.params.tokenID || '').trim();
+
+        if (!caller) {
+            return res.status(401).json({
+                success: false,
+                detail: 'Authentication required'
+            });
+        }
+        if (requestedUserId && requestedUserId !== caller) {
+            return res.status(403).json({
+                success: false,
+                detail: 'Forbidden: cannot query another user account details'
+            });
+        }
+        if (!customerRef || !tokenID) {
+            return res.status(400).json({
+                success: false,
+                detail: 'customerRef and tokenID are required'
+            });
+        }
+
+        const resolvedNetworkAddress = requireNetworkAddressForUser(caller, networkAddress);
+        const walletPath = path.join(process.cwd(), 'wallet');
+
+        // SECURITY: verify selected account is among caller-owned accounts before fetching details.
+        const accounts = await getCustomerAccountsForDashboard(walletPath, caller, resolvedNetworkAddress);
+        const allowed = (Array.isArray(accounts) ? accounts : []).some(account => {
+            const accountTokenID = (account?.token_id || '').trim();
+            const accountCustomerRef = (account?.customer_ref || '').trim();
+            const accountCustomerID = (account?.customer_id || '').trim();
+            return (
+                accountTokenID === tokenID &&
+                (accountCustomerRef === customerRef || accountCustomerID === customerRef)
+            );
+        });
+        if (!allowed) {
+            return res.status(403).json({
+                success: false,
+                detail: 'Forbidden: selected account does not belong to caller'
+            });
+        }
+
+        const walletData = await getCustomerTokenWalletDetailsForDashboard(
+            customerRef,
+            tokenID,
+            resolvedNetworkAddress,
+            walletPath,
+            caller
+        );
+        const normalizedWallet = walletData?.wallet || walletData || {};
+        return res.json({
+            success: true,
+            account: {
+                customer_ref: customerRef,
+                token_id: tokenID
+            },
+            wallet: normalizedWallet
+        });
+    } catch (error) {
+        console.error('Customer selected account wallet error:', error);
+        return res.status(500).json({
             success: false,
             detail: error.message
         });
@@ -2445,7 +3453,24 @@ app.get('/api/customer/id-access', authenticateJWT, async (req, res) => {
         }
 
         const walletPath = path.join(process.cwd(), 'wallet');
-        const access = await getCustomerIDAccess(networkAddress, tokenID, walletPath, caller);
+        let access;
+        try {
+            access = await getCustomerIDAccess(networkAddress, tokenID, walletPath, caller);
+        } catch (accessErr) {
+            const detail = String(accessErr?.message || '');
+            // Backward-compatibility fallback for older chaincode that returns not-found as an error.
+            if (detail.includes('customer record not found') || detail.includes('customer state missing')) {
+                access = await getCustomerTokenApprovalStatus(networkAddress, tokenID, walletPath, caller);
+            } else {
+                throw accessErr;
+            }
+        }
+
+        const normalizedStatus = String(
+            access?.status ||
+            access?.Status ||
+            ((access?.approved || access?.Approved) ? 'APPROVED' : 'PENDING_APPROVAL')
+        ).trim().toUpperCase();
 
         return res.json({
             success: true,
@@ -2453,12 +3478,86 @@ app.get('/api/customer/id-access', authenticateJWT, async (req, res) => {
                 token_id: access.token_id || tokenID,
                 network_address: access.network_address || networkAddress,
                 customer_id: access.customer_id || null,
-                approved: Boolean(access.approved),
-                status: access.status || (access.approved ? 'approved' : 'pending')
+                approved: Boolean(access.approved ?? access.Approved),
+                status: normalizedStatus,
+                message: access.message || access.detail || ''
             }
         });
     } catch (error) {
         console.error('Customer ID access error:', error);
+        return res.status(500).json({
+            success: false,
+            detail: error.message
+        });
+    }
+});
+
+// Customer token approval status endpoint (for dashboard).
+app.get('/api/customer/token-approval-status', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const requestedUserId = (req.query.userId || '').trim();
+        const networkAddress = req.query.networkAddress;
+        let tokenID = (req.query.tokenID || req.query.tokenId || '').trim();
+
+        if (!caller) {
+            return res.status(401).json({
+                success: false,
+                detail: 'Authentication required'
+            });
+        }
+        if (requestedUserId && requestedUserId !== caller) {
+            return res.status(403).json({
+                success: false,
+                detail: 'Forbidden: cannot query another user approval status'
+            });
+        }
+
+        const resolvedNetworkAddress = requireNetworkAddressForUser(caller, networkAddress);
+        const walletPath = path.join(process.cwd(), 'wallet');
+        if (!tokenID) {
+            try {
+                const assigned = await deriveCustomerAssignedTokens(walletPath, caller, resolvedNetworkAddress);
+                const first = Array.isArray(assigned) ? assigned[0] : null;
+                tokenID = String(first?.token_id || first?.tokenId || first?.TokenID || '').trim();
+            } catch (deriveErr) {
+                console.warn(`token-approval-status token derivation failed for ${caller}:`, deriveErr?.message || deriveErr);
+            }
+        }
+        const approval = await getCustomerTokenApprovalStatusCached(
+            resolvedNetworkAddress,
+            tokenID,
+            walletPath,
+            caller
+        );
+
+        const approvalNetworkAddress = (approval?.network_address || '').trim();
+        if (approvalNetworkAddress && approvalNetworkAddress !== resolvedNetworkAddress) {
+            return res.status(403).json({
+                success: false,
+                detail: 'Forbidden: approval payload mismatch for requested customer'
+            });
+        }
+
+        const normalizedStatus = String(approval?.status || '').trim().toUpperCase();
+        const approved = Boolean(approval?.approved);
+        const tokenAssigned = Boolean(approval?.token_assigned || approval?.token_id);
+
+        return res.json({
+            success: true,
+            approval: {
+                network_address: resolvedNetworkAddress,
+                token_id: approval?.token_id || approval?.tokenID || tokenID || '',
+                customer_ref: approval?.customer_ref || approval?.customer_id || resolvedNetworkAddress,
+                customer_id: approval?.customer_id || approval?.customer_ref || resolvedNetworkAddress,
+                bic: (approval?.bic || approval?.BIC || '').toString().trim().toUpperCase(),
+                token_assigned: tokenAssigned,
+                approved,
+                status: normalizedStatus || (approved ? 'APPROVED' : 'PENDING_APPROVAL')
+            }
+        });
+    } catch (error) {
+        console.error('Customer token approval status error:', error);
         return res.status(500).json({
             success: false,
             detail: error.message
@@ -2552,18 +3651,261 @@ app.get('/api/customer/view-all-tokens', async (req, res) => {
         console.log('Customer view all tokens request received');
 
         const walletPath = path.join(process.cwd(), 'wallet');
-        const userId = 'admin'; // Use admin to view all tokens
+        const caller = req.requestedIdentity || req.user?.username || req.user?.sub || '';
+        const degradeKey = `customer_view_all_tokens::${caller || 'anon'}`;
+        const attemptedIdentities = [];
+        const tokensById = new Map();
+        let source = '';
 
-        // Call the viewAllTokens function from app.js
-        const { viewAllTokens } = require('./app.js');
-        const tokens = await viewAllTokens(walletPath, userId);
+        // Fast path for customer dashboard: resolve assigned tokens directly first.
+        // This avoids schema-mismatch failures from ViewAllTokens-style calls.
+        if (caller) {
+            try {
+                const resolvedAddress = getNetworkAddressForUser(caller);
+                if (resolvedAddress) {
+                    const quickAssigned = await deriveCustomerAssignedTokens(walletPath, caller, resolvedAddress);
+                    if (Array.isArray(quickAssigned) && quickAssigned.length > 0) {
+                        const tokenCatalogById = new Map();
+                        try {
+                            const catalog = await viewAllTokens(walletPath, caller);
+                            if (Array.isArray(catalog)) {
+                                for (const token of catalog) {
+                                    const tokenId = String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim();
+                                    if (tokenId) {
+                                        tokenCatalogById.set(tokenId, token);
+                                    }
+                                }
+                            }
+                        } catch (catalogErr) {
+                            console.warn(`Customer view tokens fast-path catalog enrichment failed for ${caller}:`, catalogErr?.message || catalogErr);
+                        }
 
-        // Ensure transfer_ids is always an array
-        const normalizedTokens = Array.isArray(tokens)
-            ? tokens.map(token => ({ ...token, transfer_ids: Array.isArray(token.transfer_ids) ? token.transfer_ids : [] }))
-            : tokens;
+                        const quickTokens = quickAssigned.map(token => ({
+                            ...token,
+                            ...(tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim()) || {}),
+                            token_id: String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim(),
+                            tokenId: String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim(),
+                            TokenID: String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim(),
+                            owner:
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.owner) ||
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.Owner) ||
+                                token?.owner ||
+                                token?.Owner ||
+                                '',
+                            Owner:
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.owner) ||
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.Owner) ||
+                                token?.owner ||
+                                token?.Owner ||
+                                '',
+                            minted:
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.minted) ??
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.Minted) ??
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.total_supply) ??
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.TotalSupply) ??
+                                token?.minted ??
+                                token?.Minted ??
+                                token?.total_supply ??
+                                token?.TotalSupply ??
+                                0,
+                            bic:
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.bic) ||
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.BIC) ||
+                                token?.bic ||
+                                token?.BIC ||
+                                '',
+                            BIC:
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.bic) ||
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.BIC) ||
+                                token?.bic ||
+                                token?.BIC ||
+                                '',
+                            currency:
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.currency) ||
+                                (tokenCatalogById.get(String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim())?.Currency) ||
+                                token?.currency ||
+                                token?.Currency ||
+                                '',
+                            available_for_registration: false,
+                            approved_for_customer: true,
+                            status: String(token?.status || 'APPROVED').trim().toUpperCase()
+                        }));
+                        const assignedIds = new Set(
+                            quickTokens
+                                .map(token => String(token?.token_id || '').trim())
+                                .filter(Boolean)
+                        );
+                        const ownedFromCatalog = Array.from(tokenCatalogById.values())
+                            .map(token => {
+                                const tokenId = String(token?.token_id || token?.TokenID || token?.tokenID || token?.tokenId || '').trim();
+                                if (!tokenId || assignedIds.has(tokenId)) return null;
+                                const owner = String(token?.owner || token?.Owner || '').trim();
+                                if (!owner) return null;
+                                return {
+                                    ...token,
+                                    token_id: tokenId,
+                                    tokenId: tokenId,
+                                    TokenID: tokenId,
+                                    available_for_registration: false,
+                                    approved_for_customer: false,
+                                    source: 'owner_assigned_catalog'
+                                };
+                            })
+                            .filter(Boolean);
+                        const registerableFromConfig = Object.keys(ensureBankTokenConfigCache() || {})
+                            .map(tokenId => String(tokenId || '').trim())
+                            .filter(tokenId => tokenId && !assignedIds.has(tokenId))
+                            .map(tokenId => ({
+                                token_id: tokenId,
+                                tokenId,
+                                TokenID: tokenId,
+                                status: 'AVAILABLE',
+                                available_for_registration: true,
+                                approved_for_customer: false,
+                                source: 'config_registerable'
+                            }));
+                        const mergedTokens = [...quickTokens, ...ownedFromCatalog, ...registerableFromConfig];
+                        return res.json({
+                            success: true,
+                            source: 'customer_assigned_fast_path',
+                            attempted_identities: [caller],
+                            count: mergedTokens.length,
+                            available_count: registerableFromConfig.length,
+                            approved_count: quickTokens.length,
+                            approved_tokens: quickTokens,
+                            tokens: mergedTokens
+                        });
+                    }
+                }
+            } catch (quickErr) {
+                console.warn(`Customer view tokens fast-path failed for ${caller}:`, quickErr?.message || quickErr);
+            }
+        }
+
+        if (caller && isEndpointDegraded(degradeKey)) {
+            const resolvedAddress = getNetworkAddressForUser(caller);
+            const quick = resolvedAddress
+                ? await deriveCustomerAssignedTokens(walletPath, caller, resolvedAddress)
+                : [];
+            const quickIds = new Set(
+                (Array.isArray(quick) ? quick : [])
+                    .map(token => String(token?.token_id || token?.TokenID || token?.tokenId || '').trim())
+                    .filter(Boolean)
+            );
+            const registerableFromConfig = Object.keys(ensureBankTokenConfigCache() || {})
+                .map(tokenId => String(tokenId || '').trim())
+                .filter(tokenId => tokenId && !quickIds.has(tokenId))
+                .map(tokenId => ({
+                    token_id: tokenId,
+                    tokenId,
+                    TokenID: tokenId,
+                    status: 'AVAILABLE',
+                    available_for_registration: true,
+                    approved_for_customer: false,
+                    source: 'config_registerable'
+                }));
+            const mergedTokens = [...(Array.isArray(quick) ? quick : []), ...registerableFromConfig];
+            return res.json({
+                success: true,
+                source: 'degraded_cache_fallback',
+                attempted_identities: [caller],
+                count: mergedTokens.length,
+                available_count: registerableFromConfig.length,
+                approved_count: Array.isArray(quick) ? quick.length : 0,
+                approved_tokens: quick,
+                tokens: mergedTokens
+            });
+        }
+
+        const collectTokens = (list, sourceTag) => {
+            if (!Array.isArray(list)) return;
+            list.forEach(token => {
+                const tokenID = token?.token_id || token?.TokenID || token?.tokenID || '';
+                if (!tokenID) return;
+                const status = String(token.status || token.Status || '').trim().toUpperCase();
+                const owner = String(token.owner || token.Owner || '').trim();
+                const merged = {
+                    ...token,
+                    token_id: tokenID,
+                    transfer_ids: Array.isArray(token.transfer_ids) ? token.transfer_ids : [],
+                    owner,
+                    status,
+                    available_for_registration: Boolean(
+                        token.available === true ||
+                        token.Available === true ||
+                        status === 'AVAILABLE' ||
+                        !owner
+                    ),
+                    approved_for_customer: Boolean(
+                        owner ||
+                        status === 'APPROVED' ||
+                        status === 'ACTIVE' ||
+                        token.available === false ||
+                        token.Available === false
+                    )
+                };
+                tokensById.set(tokenID, merged);
+            });
+            if (list.length > 0 && !source) {
+                source = sourceTag;
+            }
+        };
+
+        if (caller) {
+            attemptedIdentities.push(caller);
+            try {
+                const callerTokens = await viewAllTokens(walletPath, caller);
+                collectTokens(callerTokens, `viewAllTokens:${caller}`);
+            } catch (callerErr) {
+                console.warn(`Customer view tokens: viewAllTokens failed for ${caller}:`, callerErr?.message || callerErr);
+                if (isSchemaMismatchError(callerErr)) {
+                    markEndpointDegraded(degradeKey);
+                }
+            }
+
+            try {
+                const availableForCaller = await getAvailableTokensForRegistration(walletPath, caller);
+                collectTokens(availableForCaller, `getAvailableTokensForRegistration:${caller}`);
+            } catch (availableErr) {
+                console.warn(`Customer view tokens: getAvailableTokensForRegistration failed for ${caller}:`, availableErr?.message || availableErr);
+                if (isSchemaMismatchError(availableErr)) {
+                    markEndpointDegraded(degradeKey);
+                }
+            }
+        }
+
+        if (tokensById.size === 0) {
+            attemptedIdentities.push('admin');
+            try {
+                const adminTokens = await viewAllTokens(walletPath, 'admin');
+                collectTokens(adminTokens, 'viewAllTokens:admin');
+            } catch (adminErr) {
+                console.warn('Customer view tokens: viewAllTokens failed for admin:', adminErr?.message || adminErr);
+                if (isSchemaMismatchError(adminErr)) {
+                    markEndpointDegraded(degradeKey);
+                }
+            }
+        }
+
+        if (tokensById.size === 0 && caller) {
+            const resolvedAddress = getNetworkAddressForUser(caller);
+            if (resolvedAddress) {
+                const quick = await deriveCustomerAssignedTokens(walletPath, caller, resolvedAddress);
+                collectTokens(quick, 'derived_assigned_tokens');
+            }
+        }
+
+        const normalizedTokens = Array.from(tokensById.values());
+        const availableCount = normalizedTokens.filter(token => token.available_for_registration).length;
+        const approvedTokens = normalizedTokens.filter(token => token.approved_for_customer);
         res.json({
             success: true,
+            source: source || 'none',
+            attempted_identities: attemptedIdentities,
+            count: normalizedTokens.length,
+            available_count: availableCount,
+            approved_count: approvedTokens.length,
+            approved_tokens: approvedTokens,
             tokens: normalizedTokens
         });
     } catch (error) {
@@ -2986,7 +4328,7 @@ app.get('/api/debug/token/:tokenID', async (req, res) => {
 // Token-to-token transfer request
 app.post('/api/token-transfer-request', authenticateJWT, async (req, res) => {
     try {
-        const { senderTokenID, receiverTokenID, amount } = req.body;
+        const { senderTokenID, receiverTokenID, amount, purpose } = req.body;
         const callerId = getCallerFromJWT(req);
         const senderOwnerAddress = getNetworkAddressForUser(callerId);
         if (!senderOwnerAddress) {
@@ -3025,6 +4367,7 @@ app.post('/api/token-transfer-request', authenticateJWT, async (req, res) => {
             receiverTokenID,
             senderOwnerAddress,
             parsedAmount,
+            (purpose || 'INTERBANK_SETTLEMENT'),
             walletPath,
             resolvedUserId
         );
@@ -3032,11 +4375,13 @@ app.post('/api/token-transfer-request', authenticateJWT, async (req, res) => {
         res.json({
             success: true,
             request_id: requestId,
+            msg_id: requestId,
             message: 'Token transfer request created',
             transfer_details: {
                 sender_token: senderTokenID,
                 receiver_token: receiverTokenID,
                 amount: parseFloat(amount),
+                purpose: (purpose || 'INTERBANK_SETTLEMENT'),
                 is_cross_token: senderTokenID !== receiverTokenID,
                 timestamp: new Date().toISOString()
             }
@@ -3072,7 +4417,10 @@ app.get('/api/token-transfer-requests/pending', async (req, res) => {
             userId
         );
 
-        res.json(Array.isArray(pending) ? pending : []);
+        const normalized = Array.isArray(pending)
+            ? pending.map(item => normalizeTokenTransferRequestRecord(item))
+            : [];
+        res.json(normalized);
     } catch (error) {
         console.error('View pending token transfer requests error:', error);
         res.status(500).json({
@@ -3329,7 +4677,10 @@ app.get('/api/token-transfer-history', async (req, res) => {
 
         const walletPath = path.join(process.cwd(), 'wallet');
         const history = await listTokenToTokenTransferHistory(tokenID, walletPath, userId);
-        res.json(Array.isArray(history) ? history : []);
+        const normalized = Array.isArray(history)
+            ? history.map(item => normalizeTokenTransferHistoryRecord(item))
+            : [];
+        res.json(normalized);
     } catch (error) {
         console.error('Token-to-token history error:', error);
         res.status(500).json({
@@ -3339,20 +4690,106 @@ app.get('/api/token-transfer-history', async (req, res) => {
     }
 });
 
+// Participant settlement records (privacy-safe, BIC-based)
+app.get('/api/participant-transfer-records/sender/:senderBIC', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const senderBIC = String(req.params.senderBIC || '').trim().toUpperCase();
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const records = await getSenderRecords(walletPath, caller, senderBIC);
+        const normalized = Array.isArray(records) ? records.map(normalizeParticipantTransferRecord) : [];
+        res.json({
+            success: true,
+            sender_bic: senderBIC,
+            count: normalized.length,
+            records: normalized
+        });
+    } catch (error) {
+        console.error('Get sender participant records error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.get('/api/participant-transfer-records/receiver/:receiverBIC', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const receiverBIC = String(req.params.receiverBIC || '').trim().toUpperCase();
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const records = await getReceiverRecords(walletPath, caller, receiverBIC);
+        const normalized = Array.isArray(records) ? records.map(normalizeParticipantTransferRecord) : [];
+        res.json({
+            success: true,
+            receiver_bic: receiverBIC,
+            count: normalized.length,
+            records: normalized
+        });
+    } catch (error) {
+        console.error('Get receiver participant records error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.get('/api/participant-transfer-records/volume-by-bic', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const volume = await totalVolumeByBIC(walletPath, caller);
+        res.json({
+            success: true,
+            volume_by_bic: volume || {}
+        });
+    } catch (error) {
+        console.error('Get participant transfer volume-by-bic error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // Token request endpoint (for bank dashboard)
 app.post('/api/token-request', async (req, res) => {
     try {
-        const { userId, name, networkAddress, country, currency } = req.body;
-        console.log('Token request:', { userId, name, networkAddress, country, currency });
+        const {
+            userId,
+            name,
+            networkAddress,
+            country,
+            currency,
+            institution_id,
+            institution_name,
+            country_code,
+            currency_code,
+            reference
+        } = req.body;
 
-        if (!currency || !currency.trim()) {
+        const institutionID = String(institution_id || networkAddress || '').trim().toUpperCase();
+        const institutionName = String(institution_name || name || userId || '').trim();
+        const normalizedCountry = String(country_code || country || '').trim().toUpperCase();
+        const normalizedCurrency = String(currency_code || currency || '').trim().toUpperCase();
+        const businessReference = String(reference || `REQ${Date.now()}`).trim();
+
+        console.log('Token request:', {
+            userId,
+            institution_id: institutionID,
+            institution_name: institutionName,
+            country_code: normalizedCountry,
+            currency_code: normalizedCurrency,
+            reference: businessReference
+        });
+
+        if (!normalizedCurrency) {
             return res.status(400).json({
                 success: false,
-                detail: 'currency is required when submitting a token request'
+                detail: 'currency_code is required when submitting a token request'
             });
         }
-
-        const normalizedCurrency = currency.trim().toUpperCase();
 
         const walletPath = path.join(process.cwd(), 'wallet');
         const wallet = await Wallets.newFileSystemWallet(walletPath);
@@ -3406,7 +4843,7 @@ app.post('/api/token-request', async (req, res) => {
         if (!participantAlreadyRegistered) {
             try {
                 await submitWithRetry(
-                    () => submitRegistration(userId, country, walletPath, userId),
+                    () => submitRegistration(userId, normalizedCountry, walletPath, userId),
                     3,
                     `SubmitRegistration for ${userId}`
                 );
@@ -3423,12 +4860,30 @@ app.post('/api/token-request', async (req, res) => {
         }
 
         try {
-            await submitWithRetry(
-                () => requestTokenRequest(userId, finalNetworkAddress, country, normalizedCurrency, walletPath, userId),
+            const tokenRequestResponse = await submitWithRetry(
+                () => requestTokenRequest(
+                    institutionID,
+                    institutionName,
+                    normalizedCountry,
+                    normalizedCurrency,
+                    businessReference,
+                    walletPath,
+                    userId
+                ),
                 3,
                 `RequestTokenRequest for ${userId}`
             );
             console.log('Token request submitted successfully to blockchain');
+
+            return res.json({
+                success: true,
+                ...tokenRequestResponse,
+                institution_id: institutionID,
+                institution_name: institutionName,
+                country_code: normalizedCountry,
+                currency_code: normalizedCurrency,
+                reference: businessReference
+            });
         } catch (error) {
             console.error('Token request failed:', error.message);
             return res.status(500).json({
@@ -3436,14 +4891,6 @@ app.post('/api/token-request', async (req, res) => {
                 detail: `Token request failed: ${error.message}`
             });
         }
-
-        res.json({
-            success: true,
-            message: 'Token request submitted to blockchain successfully',
-            network_address: finalNetworkAddress,
-            user_id: userId,
-            currency: normalizedCurrency
-        });
     } catch (error) {
         console.error('Token request error:', error);
         res.status(500).json({
@@ -3467,14 +4914,24 @@ app.get('/api/token-requests/pending', async (req, res) => {
 
         let normalized = [];
         const normalizeEntry = req => ({
-            request_id: req.request_id || req.RequestID || null,
+            request_id: req.request_id || req.RequestID || req.msg_id || req.MsgID || null,
+            msg_id: req.msg_id || req.MsgID || '',
+            institution_id: req.institution_id || req.InstitutionID || '',
+            institution_name: req.institution_name || req.InstitutionName || '',
+            country_code: req.country_code || req.CountryCode || '',
+            currency_code: req.currency_code || req.CurrencyCode || '',
+            reference: req.reference || req.Reference || '',
+            created_at: req.created_at || req.CreatedAt || '',
+            valid_until: req.valid_until || req.ValidUntil || '',
+            request_purpose: req.request_purpose || req.RequestPurpose || '',
+            approver_id: req.approver_id || req.ApproverID || '',
             network_addr: req.network_addr || req.NetworkAddr || '',
             participant_address: req.participant_address || req.ParticipantAddress || '',
             caller_id: req.caller_id || req.CallerID || '',
             caller_msp: req.caller_msp || req.CallerMSP || '',
             status: req.status || req.Status || 'PENDING',
             token_id: req.token_id || req.TokenID || '',
-            currency: req.currency || req.Currency || ''
+            currency: req.currency || req.Currency || req.currency_code || req.CurrencyCode || ''
         });
 
         if (Array.isArray(pendingRequests)) {
@@ -3516,8 +4973,10 @@ app.get('/api/admin/mint-requests/pending', async (req, res) => {
             requests: pendingRequests
         });
 
-        // Return exact blockchain data without additional wrapping
-        res.json(pendingRequests || []);
+        const normalized = Array.isArray(pendingRequests)
+            ? pendingRequests.map(req => normalizeMintRequestRecord(req))
+            : [];
+        res.json(normalized);
     } catch (error) {
         console.error('Admin Dashboard: Get pending mint requests error:', error);
         res.status(500).json({
@@ -3541,7 +5000,10 @@ app.get('/api/mint-requests/pending', async (req, res) => {
         const pendingRequests = await getPendingMintRequests(walletPath, adminId);
         console.log('Legacy: Pending mint requests from Fabric:', pendingRequests);
 
-        res.json(pendingRequests);
+        const normalized = Array.isArray(pendingRequests)
+            ? pendingRequests.map(req => normalizeMintRequestRecord(req))
+            : [];
+        res.json(normalized);
     } catch (error) {
         console.error('Legacy: Get pending mint requests error:', error);
         res.status(500).json({
@@ -3554,21 +5016,22 @@ app.get('/api/mint-requests/pending', async (req, res) => {
 // Mint request endpoint - Using app.js requestMintCoins function
 app.post('/api/mint-request', async (req, res) => {
     try {
-        const { amount, userId, networkAddress } = req.body;
-        console.log('Mint request submitted to Fabric:', { amount, userId, networkAddress });
+        const { amount, userId, networkAddress, purpose } = req.body;
+        const normalizedPurpose = String(purpose || 'WORKING_CAPITAL').trim().toUpperCase();
+        console.log('Mint request submitted to Fabric:', { amount, userId, networkAddress, purpose: normalizedPurpose });
 
-        if (!amount || !userId || !networkAddress) {
+        if (!amount || !userId) {
             return res.status(400).json({
                 success: false,
-                detail: 'Missing required parameters: amount, userId, networkAddress'
+                detail: 'Missing required parameters: amount, userId'
             });
         }
 
-        const parsedAmount = parseFloat(amount);
-        if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+        const parsedAmount = Number.parseInt(String(amount), 10);
+        if (!Number.isInteger(parsedAmount) || parsedAmount <= 0) {
             return res.status(400).json({
                 success: false,
-                detail: 'amount must be a positive number'
+                detail: 'amount must be a positive integer'
             });
         }
 
@@ -3577,14 +5040,15 @@ app.post('/api/mint-request', async (req, res) => {
         console.log('Using requestMintCoins function from app.js with parameters:', {
             networkAddress,
             amount,
+            purpose: normalizedPurpose,
             walletPath,
             userId
         });
 
         await submitWithRetry(
-            () => requestMintCoins(networkAddress, parsedAmount, walletPath, userId),
+            () => requestMintCoins(networkAddress || '', parsedAmount, walletPath, userId, normalizedPurpose),
             3,
-            `RequestMintCoins for ${userId}`
+            `RequestTokenMint for ${userId}`
         );
 
         console.log('Mint request successfully submitted to blockchain via app.js function');
@@ -3595,7 +5059,8 @@ app.post('/api/mint-request', async (req, res) => {
             request_details: {
                 user_id: userId,
                 network_address: networkAddress,
-                amount: parseInt(amount)
+                amount: parsedAmount,
+                purpose: normalizedPurpose
             }
         });
     } catch (error) {
@@ -3811,6 +5276,8 @@ app.get('/api/bank/wallet', authenticateJWT, async (req, res) => {
                     const tokenInfo = {
                         networkAddress: normalizedNetworkAddress,
                         tokenID: tokenId,
+                        bic: (freshToken.bic || freshToken.BIC || '').toString().trim().toUpperCase(),
+                        bic_code: (freshToken.bic || freshToken.BIC || '').toString().trim().toUpperCase(),
                         currency: freshToken.currency || freshToken.Currency || '',
                         currencySymbol: currencySymbol(freshToken.currency || freshToken.Currency || ''),
                         availableBalance: (freshToken.minted || 0),
@@ -3904,6 +5371,8 @@ app.get('/api/bank/wallet', authenticateJWT, async (req, res) => {
                 const tokenOwnerInfo = {
                     networkAddress: normalizedNetworkAddress,
                     tokenID: tokenId,
+                    bic: (freshToken.bic || freshToken.BIC || '').toString().trim().toUpperCase(),
+                    bic_code: (freshToken.bic || freshToken.BIC || '').toString().trim().toUpperCase(),
                     currency: freshToken.currency || freshToken.Currency || '',
                     currencySymbol: currencySymbol(freshToken.currency || freshToken.Currency || ''),
                     availableBalance: (freshToken.minted || freshToken.Minted || 0),
@@ -4124,8 +5593,24 @@ app.get('/api/bank/customer-registrations/pending', authenticateJWT, async (req,
                     }
                 }
 
-                console.log('Pending customer registrations across tokens:', allRegistrations);
-                return res.json(allRegistrations);
+                const normalizedAcrossTokens = Array.isArray(allRegistrations)
+                    ? allRegistrations.map(r => ({
+                        ...r,
+                        request_id: r.request_id || r.RequestID || r.msg_id || r.MsgID || '',
+                        msg_id: r.msg_id || r.MsgID || r.request_id || r.RequestID || '',
+                        token_id: r.token_id || r.TokenID || '',
+                        customer_ref: r.customer_ref || r.CustomerRef || r.network_address || r.NetworkAddress || '',
+                        name: r.name || r.customer_ref || r.CustomerRef || '',
+                        kyc_ref: r.kyc_ref || r.KycRef || r.kyc_id || r.kycId || '',
+                        kyc_id: r.kyc_id || r.kycId || r.kyc_ref || r.KycRef || '',
+                        kyc_status: r.kyc_status || r.kycStatus || '',
+                        purpose: r.purpose || r.Purpose || '',
+                        created_at: r.created_at || r.CreatedAt || '',
+                        expires_at: r.expires_at || r.ExpiresAt || ''
+                    }))
+                    : [];
+                console.log('Pending customer registrations across tokens:', normalizedAcrossTokens);
+                return res.json(normalizedAcrossTokens);
             }
 
             // If no token ID provided and no customer address, return empty array
@@ -4183,8 +5668,17 @@ app.get('/api/bank/customer-registrations/pending', authenticateJWT, async (req,
                     const { transfer_ids, transferIDs, ...rest } = r;
                     return {
                         ...rest,
-                        kyc_id: (r.kyc_id || r.kycId) || '',
-                        kyc_status: (r.kyc_status || r.kycStatus) || ''
+                        request_id: r.request_id || r.RequestID || r.msg_id || r.MsgID || '',
+                        msg_id: r.msg_id || r.MsgID || r.request_id || r.RequestID || '',
+                        token_id: r.token_id || r.TokenID || '',
+                        customer_ref: r.customer_ref || r.CustomerRef || r.network_address || r.NetworkAddress || '',
+                        name: r.name || r.customer_ref || r.CustomerRef || '',
+                        kyc_ref: (r.kyc_ref || r.KycRef || r.kyc_id || r.kycId) || '',
+                        kyc_id: (r.kyc_id || r.kycId || r.kyc_ref || r.KycRef) || '',
+                        kyc_status: (r.kyc_status || r.kycStatus) || '',
+                        purpose: r.purpose || r.Purpose || '',
+                        created_at: r.created_at || r.CreatedAt || '',
+                        expires_at: r.expires_at || r.ExpiresAt || ''
                     };
                 })
                 : [];
@@ -4231,11 +5725,7 @@ app.get('/api/bank/customer-registrations/approved', authenticateJWT, async (req
         try {
             const approved = await listApprovedCustomers(tokenID, ownerNetworkAddress, walletPath, userId);
             const normalized = Array.isArray(approved)
-                ? approved.map(r => ({
-                    ...r,
-                    kyc_id: (r.kyc_id || r.kycId) || '',
-                    kyc_status: (r.kyc_status || r.kycStatus) || ''
-                }))
+                ? approved.map((r) => normalizeParticipantRecord(r))
                 : [];
             res.json(normalized);
         } catch (fabricError) {
@@ -4303,8 +5793,8 @@ app.post('/api/bank/customer-registrations/:requestId/approve', authenticateJWT,
                     'GetState',
                     [requestId]
                 );
-                if (request && request.TokenID) {
-                    registrationTokenId = request.TokenID;
+                if (request) {
+                    registrationTokenId = request.TokenID || request.token_id || request.tokenId || null;
                 }
             } catch (queryErr) {
                 console.warn('Could not query registration request directly, proceeding:', queryErr?.message);
@@ -4331,7 +5821,7 @@ app.post('/api/bank/customer-registrations/:requestId/approve', authenticateJWT,
                 }
             }
 
-            // Call actual Fabric function to approve customer registration
+            // Call actual Fabric function to approve/reject customer registration
             if (status === 'approved' && requestId && ownerNetworkAddress) {
                 const result = await submitWithRetry(
                     () => approveCustomerRegistration(
@@ -4344,14 +5834,27 @@ app.post('/api/bank/customer-registrations/:requestId/approve', authenticateJWT,
                     `ApproveCustomerRegistration for ${requestId}`
                 );
                 console.log('Customer registration approved via Fabric:', result);
+            } else if (status === 'rejected' && requestId && ownerNetworkAddress) {
+                const result = await submitWithRetry(
+                    () => rejectCustomerRegistration(
+                        requestId,
+                        ownerNetworkAddress,
+                        walletPath,
+                        userId
+                    ),
+                    3,
+                    `RejectCustomerRegistration for ${requestId}`
+                );
+                console.log('Customer registration rejected via Fabric:', result);
             }
 
             res.json({
                 success: true,
                 message: `Customer registration ${status} successfully`,
                 request_id: requestId,
+                msg_id: requestId,
                 status: status,
-                approved_at: new Date().toISOString()
+                actioned_at: new Date().toISOString()
             });
         } catch (fabricError) {
             console.error('Fabric error during approval:', fabricError.message);
@@ -4367,6 +5870,7 @@ app.post('/api/bank/customer-registrations/:requestId/approve', authenticateJWT,
                 success: false,
                 message: `Failed to ${status} customer registration: ${errorDetail}`,
                 request_id: requestId,
+                msg_id: requestId,
                 status: status,
                 error: fabricError.message
             });
@@ -4461,14 +5965,7 @@ app.get('/api/bank/customer-mint-requests/pending', authenticateJWT, async (req,
             }
 
             const normalized = Array.isArray(pendingMintRequests)
-                ? pendingMintRequests.map(req => ({
-                    ...req,
-                    customer_id: req.customer_id || req.CustomerID || req.customerId || req.requested_by_name || '',
-                    name: req.name || req.customer_name || '',
-                    kyc_id: (req.kyc_id || req.kycId) || '',
-                    kyc_status: (req.kyc_status || req.kycStatus) || '',
-                    token_id: req.token_id || req.tokenId || req.TokenID || req.tokenID || ''
-                }))
+                ? pendingMintRequests.map(req => normalizeMintRequestRecord(req))
                 : [];
             res.json(normalized);
         } catch (fabricError) {
@@ -4490,13 +5987,28 @@ app.get('/api/bank/customer-mint-requests/pending', authenticateJWT, async (req,
 app.post('/api/bank/customer-mint-requests/:requestId/approve', authenticateJWT, async (req, res) => {
     try {
         const { requestId } = req.params;
-        const { status, tokenID } = req.body;
+        const rawStatus = req.body?.status;
+        const status = typeof rawStatus === 'string' && rawStatus.trim()
+            ? rawStatus.trim().toLowerCase()
+            : 'approved';
+        let tokenID =
+            req.body?.tokenID ||
+            req.body?.tokenId ||
+            req.query?.tokenID ||
+            req.query?.tokenId ||
+            '';
 
         // Resolve bank identity from JWT
         const bankUserId = req.user.username;
         const ownerNetworkAddress = getNetworkAddressForUser(bankUserId);
 
-        console.log('Approve customer mint request by bank:', { requestId, status, tokenID, ownerNetworkAddress });
+        console.log('Approve customer mint request by bank:', {
+            requestId,
+            rawStatus,
+            normalizedStatus: status,
+            tokenID,
+            ownerNetworkAddress
+        });
 
         if (!requestId) {
             return res.status(400).json({
@@ -4522,7 +6034,52 @@ app.post('/api/bank/customer-mint-requests/:requestId/approve', authenticateJWT,
         const userId = bankUserId;
 
         try {
-            // Call actual Fabric function to approve customer mint request
+            // Auto-resolve tokenID from mint request record when not provided by caller.
+            if (!tokenID) {
+                try {
+                    const mintReq = await queryChaincode(
+                        walletPath,
+                        userId,
+                        'mychannel',
+                        'fabcar',
+                        'GetState',
+                        [requestId]
+                    );
+                    tokenID =
+                        mintReq?.token_id ||
+                        mintReq?.tokenID ||
+                        mintReq?.tokenId ||
+                        mintReq?.TokenID ||
+                        '';
+                } catch (mintReqErr) {
+                    console.warn('Could not resolve tokenID from mint request:', mintReqErr?.message);
+                }
+            }
+
+            // Verify caller owns the request token (best effort when tokenID is available).
+            if (tokenID && userId !== 'admin') {
+                let userOwnedTokens = [];
+                try {
+                    const strictOwnedTokens = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
+                    if (Array.isArray(strictOwnedTokens)) {
+                        userOwnedTokens = strictOwnedTokens
+                            .map(t => t.TokenID || t.tokenID || t.token_id || t.tokenId)
+                            .filter(Boolean);
+                    }
+                } catch (tokenErr) {
+                    console.warn('Could not verify user token ownership for mint approval:', tokenErr?.message);
+                }
+
+                if (userOwnedTokens.length > 0 && !userOwnedTokens.includes(tokenID)) {
+                    return res.status(403).json({
+                        success: false,
+                        detail: `Access denied. This mint request belongs to token ${tokenID}, which you do not own.`,
+                        error: 'permission denied'
+                    });
+                }
+            }
+
+            // Call actual Fabric function to approve/reject customer mint request
             if (status === 'approved' && requestId && ownerNetworkAddress) {
                 const result = await submitWithRetry(
                     () => approveCustomerMint(
@@ -4535,6 +6092,18 @@ app.post('/api/bank/customer-mint-requests/:requestId/approve', authenticateJWT,
                     `ApproveCustomerMint for ${requestId}`
                 );
                 console.log('Customer mint request approved via Fabric:', result);
+            } else if (status === 'rejected' && requestId && ownerNetworkAddress) {
+                const result = await submitWithRetry(
+                    () => rejectCustomerMint(
+                        requestId,
+                        ownerNetworkAddress,
+                        walletPath,
+                        userId
+                    ),
+                    3,
+                    `RejectCustomerMint for ${requestId}`
+                );
+                console.log('Customer mint request rejected via Fabric:', result);
             }
 
             res.json({
@@ -4542,7 +6111,8 @@ app.post('/api/bank/customer-mint-requests/:requestId/approve', authenticateJWT,
                 message: `Customer mint request ${status} successfully`,
                 request_id: requestId,
                 status: status,
-                approved_at: new Date().toISOString()
+                token_id: tokenID || null,
+                actioned_at: new Date().toISOString()
             });
         } catch (fabricError) {
             console.error('Fabric error during approval:', fabricError.message);
@@ -4790,10 +6360,102 @@ app.get('/api/bank/view-all-tokens', async (req, res) => {
 // List assigned tokens for the authenticated bank owner only
 app.get('/api/bank/assigned-tokens', authenticateJWT, async (req, res) => {
     try {
-        const { userId, ownerNetworkAddress } = getBankCallerContext(req);
         const walletPath = path.join(process.cwd(), 'wallet');
-        const assigned = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
-        res.json(Array.isArray(assigned) ? assigned : []);
+        const jwtUser = req.user?.username || req.user?.sub || '';
+        const role = String(req.user?.role || '').trim().toLowerCase();
+        let userId = jwtUser;
+        let ownerNetworkAddress = '';
+        let ownerScoped = [];
+        let scope = 'owner';
+
+        const buildCustomerTokenAccessFallback = async (identity, ownerAddress) => {
+            try {
+                const effectiveUser = identity || jwtUser;
+                const effectiveAddress = ownerAddress || getNetworkAddressForUser(effectiveUser);
+                if (!effectiveUser || !effectiveAddress) {
+                    return [];
+                }
+                let tokenId = '';
+                try {
+                    tokenId = String(await getTokenAccess(effectiveAddress, walletPath, effectiveUser)).trim();
+                } catch (accessErr) {
+                    console.warn('assigned-tokens token-access via caller failed:', accessErr?.message || accessErr);
+                    if (effectiveUser !== 'admin') {
+                        tokenId = String(await getTokenAccess(effectiveAddress, walletPath, 'admin')).trim();
+                    }
+                }
+                if (!tokenId) {
+                    return [];
+                }
+                return [{
+                    token_id: tokenId,
+                    TokenID: tokenId,
+                    tokenId,
+                    owner: effectiveAddress,
+                    Owner: effectiveAddress,
+                    status: 'ACTIVE',
+                    source: 'customer_token_access'
+                }];
+            } catch (fallbackErr) {
+                console.warn('assigned-tokens token-access fallback failed:', fallbackErr?.message || fallbackErr);
+                return [];
+            }
+        };
+
+        // Customer identity fallback first: avoid schema-dependent token list functions.
+        if (role === 'customer') {
+            let directCustomerTokens = [];
+            try {
+                const resolvedAddress = requireNetworkAddressForUser(userId || jwtUser, '');
+                directCustomerTokens = await deriveCustomerAssignedTokens(
+                    walletPath,
+                    userId || jwtUser,
+                    resolvedAddress
+                );
+            } catch (customerDeriveErr) {
+                console.warn('assigned-tokens customer derive fallback failed:', customerDeriveErr?.message || customerDeriveErr);
+            }
+            if (directCustomerTokens.length === 0) {
+                directCustomerTokens = await buildCustomerTokenAccessFallback(userId || jwtUser, '');
+            }
+            if (directCustomerTokens.length > 0) {
+                return res.json(directCustomerTokens);
+            }
+        }
+
+        try {
+            const context = getBankCallerContext(req);
+            userId = context.userId;
+            ownerNetworkAddress = context.ownerNetworkAddress;
+            ownerScoped = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
+        } catch (contextErr) {
+            console.warn('assigned-tokens owner context failed; using fallback listAssignedTokens:', contextErr?.message || contextErr);
+        }
+
+        if (Array.isArray(ownerScoped) && ownerScoped.length > 0) {
+            return res.json(ownerScoped);
+        }
+
+        // Fallback: return assigned tokens visible to caller/admin context.
+        // This keeps customer dashboard usable when ownerNetworkAddress is not bank-owner scoped.
+        scope = 'fallback';
+        let fallbackTokens = [];
+        try {
+            fallbackTokens = await listAssignedTokens(walletPath, userId || jwtUser || 'admin');
+        } catch (callerFallbackErr) {
+            console.warn('assigned-tokens fallback via caller failed:', callerFallbackErr?.message || callerFallbackErr);
+            try {
+                fallbackTokens = await listAssignedTokens(walletPath, 'admin');
+                userId = 'admin';
+            } catch (adminFallbackErr) {
+                console.warn('assigned-tokens fallback via admin failed:', adminFallbackErr?.message || adminFallbackErr);
+                fallbackTokens = await buildCustomerTokenAccessFallback(userId || jwtUser, ownerNetworkAddress);
+            }
+        }
+
+        const normalized = Array.isArray(fallbackTokens) ? fallbackTokens : [];
+        console.log(`assigned-tokens scope=${scope} user=${userId || 'unknown'} owner=${ownerNetworkAddress || 'n/a'} count=${normalized.length}`);
+        res.json(normalized);
     } catch (error) {
         console.error('List assigned tokens error:', error);
         res.status(500).json({
@@ -4873,18 +6535,25 @@ app.get('/api/bank/participants/approved', authenticateJWT, async (req, res) => 
                 if (Array.isArray(approvedCustomers) && approvedCustomers.length > 0) {
                     approvedCustomers.forEach(c => {
                         const mintReq = {
+                            msg_id: c.msg_id || '',
                             requested_by: c.network_address || c.NetworkAddress,
                             RequestedBy: c.network_address || c.NetworkAddress,
+                            customer_ref: c.customer_ref || c.customer_id || c.CustomerID || c.network_address || c.NetworkAddress,
+                            CustomerRef: c.customer_ref || c.customer_id || c.CustomerID || c.network_address || c.NetworkAddress,
                             name: c.name || c.Name,
                             Name: c.name || c.Name,
                             token_id: c.token_id || c.TokenID,
                             TokenID: c.token_id || c.TokenID,
                             kyc_id: c.kyc_id || c.KYCID,
                             KYCID: c.kyc_id || c.KYCID,
+                            kyc_ref: c.kyc_ref || c.kyc_id || c.KYCID,
+                            KycRef: c.kyc_ref || c.kyc_id || c.KYCID,
                             kyc_status: c.kyc_status || c.KYCStatus,
                             KYCStatus: c.kyc_status || c.KYCStatus,
                             approved: c.approved || c.Approved,
-                            Approved: c.approved || c.Approved
+                            Approved: c.approved || c.Approved,
+                            approved_at: c.approved_at || c.ApprovedAt || c.activated_at || c.ActivatedAt || '',
+                            ApprovedAt: c.approved_at || c.ApprovedAt || c.activated_at || c.ActivatedAt || ''
                         };
                         mintRecords.push(mintReq);
                     });
@@ -4900,12 +6569,16 @@ app.get('/api/bank/participants/approved', authenticateJWT, async (req, res) => 
             const regUser = resolveIdentityFromNetworkAddress(netAddr);
             const cnFallback = extractCN(netAddr);
             merged.push({
+                msg_id: m.msg_id || m.MsgID || '',
+                customer_id: m.customer_id || m.CustomerID || m.customerId || '',
+                customer_ref: m.customer_ref || m.CustomerRef || m.customer_id || m.CustomerID || m.customerId || netAddr || '',
                 name: m.name || m.Name || regUser || cnFallback,
                 network_address: netAddr,
                 token_id: m.token_id || m.TokenID || m.tokenId || '',
                 kyc_id: m.kyc_id || m.KYCID || '',
+                kyc_ref: m.kyc_ref || m.KycRef || m.kyc_id || m.KYCID || '',
                 kyc_status: m.kyc_status || m.KYCStatus || '',
-                approved_at: m.approved_at || m.ApprovedAt || '',
+                approved_at: m.approved_at || m.ApprovedAt || m.created_at || m.CreatedAt || m.timestamp || '',
                 transfer_ids: [],
                 token_transfer_ids: []
             });
@@ -4978,10 +6651,11 @@ app.get('/api/bank/participants/approved', authenticateJWT, async (req, res) => 
             }
         }
         
+        const normalizedParticipants = filtered.map((entry) => normalizeParticipantRecord(entry));
         console.log(`Approved participants: After authorization - merged.length=${merged.length}, deduped.length=${deduped.length}, cleaned.length=${cleaned.length}, filtered.length=${filtered.length}`);
         
         // Return the data directly
-        res.json(filtered);
+        res.json(normalizedParticipants);
     } catch (error) {
         console.error('List approved participants error:', error);
         res.status(500).json({
@@ -5018,22 +6692,65 @@ app.get('/api/participant-mint-requests/approved', authenticateJWT, async (req, 
         const approved = await listApprovedParticipantMintRequests(walletPath, userId);
         const normalized = Array.isArray(approved)
             ? approved
+                .map(req => normalizeMintRequestRecord(req))
                 .filter(req => {
                     const tokenId = req.token_id || req.tokenID || req.TokenID || req.tokenId;
                     if (!tokenId || ownerTokenIds.size === 0) return false;
-                    return ownerTokenIds.has(tokenId);
+                    if (!ownerTokenIds.has(tokenId)) return false;
+                    // Customer records lane should show customer mint requests only.
+                    const customerRef = String(req.customer_ref || req.customer_id || '').trim().toUpperCase();
+                    return customerRef.startsWith('CUST_');
                 })
-                .map(req => ({
-                    ...req,
-                    customer_id: req.customer_id || req.CustomerID || req.customerId || req.requested_by_name || '',
-                    name: req.name || req.customer_name || '',
-                    kyc_id: (req.kyc_id || req.kycId) || '',
-                    kyc_status: (req.kyc_status || req.kycStatus) || ''
-                }))
             : [];
         res.json(normalized);
     } catch (error) {
         console.error('Approved participant mint requests error:', error);
+        res.status(500).json({
+            success: false,
+            detail: error.message
+        });
+    }
+});
+
+// Token-owner/admin mint records (separate from customer mint requests)
+app.get('/api/bank/token-mint-records', authenticateJWT, async (req, res) => {
+    try {
+        let ownerNetworkAddress;
+        let userId;
+        try {
+            ({ ownerNetworkAddress, userId } = getBankCallerContext(req));
+        } catch (ctxErr) {
+            return res.status(400).json({
+                success: false,
+                detail: ctxErr.message
+            });
+        }
+
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const ownerTokens = await getStrictOwnerTokens(walletPath, userId, ownerNetworkAddress);
+        const ownerTokenIds = new Set(
+            (Array.isArray(ownerTokens) ? ownerTokens : [])
+                .map(t => t.token_id || t.tokenID || t.tokenId || t.TokenID)
+                .filter(Boolean)
+        );
+
+        const records = await listTokenMintRecords(walletPath, userId);
+        const normalized = (Array.isArray(records) ? records : [])
+            .map(normalizeTokenMintRecord)
+            .filter(rec => {
+                const tokenId = rec.token_id || rec.tokenID || rec.TokenID || '';
+                if (!tokenId || ownerTokenIds.size === 0) return false;
+                return ownerTokenIds.has(tokenId);
+            })
+            .sort((a, b) => {
+                const at = new Date(a.approved_at || a.created_at || 0).getTime() || 0;
+                const bt = new Date(b.approved_at || b.created_at || 0).getTime() || 0;
+                return bt - at;
+            });
+
+        res.json(normalized);
+    } catch (error) {
+        console.error('Token mint records error:', error);
         res.status(500).json({
             success: false,
             detail: error.message
@@ -5047,7 +6764,10 @@ app.get('/api/mint-requests/approved', async (req, res) => {
         const { userId = 'admin' } = req.query;
         const walletPath = path.join(process.cwd(), 'wallet');
         const approved = await getApprovedMintRequests(walletPath, userId);
-        res.json(Array.isArray(approved) ? approved : []);
+        const normalized = Array.isArray(approved)
+            ? approved.map(req => normalizeMintRequestRecord(req))
+            : [];
+        res.json(normalized);
     } catch (error) {
         console.error('Approved mint requests error:', error);
         res.status(500).json({
@@ -5099,7 +6819,28 @@ async function processBankCustomerRegistration(req, res, options = {}) {
         }
 
         const walletPath = path.resolve(__dirname, 'wallet');
-        const resolvedCustomerId = customerId || name;
+        const resolvedCustomerId = String(customerId || name || '').trim();
+        const providedKycId = String(kycId || '').trim();
+        // Canonical rule: if customerId is provided by bank DB, KYC id must be the same value.
+        const resolvedKycId = resolvedCustomerId || providedKycId;
+        if (!resolvedCustomerId) {
+            return res.status(400).json({
+                error: 'customerId is required',
+                help: 'Provide customerId from bank database API (for example: u_1771961764762152952)'
+            });
+        }
+        if (providedKycId && providedKycId !== resolvedCustomerId) {
+            console.warn('Register-customer: received mismatched kycId; overriding with customerId', {
+                customerId: resolvedCustomerId,
+                providedKycId
+            });
+        }
+        console.log('Register-customer canonical IDs:', {
+            tokenID: resolvedTokenID,
+            customerId: resolvedCustomerId,
+            incomingKycId: providedKycId || null,
+            effectiveKycId: resolvedKycId
+        });
         const resolvedInvoker = req.requestedIdentity || userId || 'admin';
         // Optionally force an owner/system identity for customer upserts so customers can initiate without owner JWT
         const forcedOwnerInvoker = process.env.FABRIC_TOKEN_OWNER_USER || process.env.FABRIC_SERVICE_USER || null;
@@ -5129,7 +6870,7 @@ async function processBankCustomerRegistration(req, res, options = {}) {
                     networkAddress,
                     resolvedCustomerId,
                     resolvedTokenID,
-                    kycId || '',
+                    resolvedKycId,
                     interpretedStatus || '',
                     walletPath,
                     upsertInvoker
@@ -5140,7 +6881,8 @@ async function processBankCustomerRegistration(req, res, options = {}) {
                     message: 'Customer recorded and approved automatically',
                     networkAddress,
                     tokenID: resolvedTokenID,
-                    kycId: kycId || null,
+                    customerId: resolvedCustomerId,
+                    kycId: resolvedKycId || null,
                     kycStatus: interpretedStatus || ''
                 });
             }
@@ -5152,7 +6894,7 @@ async function processBankCustomerRegistration(req, res, options = {}) {
                     resolvedTokenID,
                     walletPath,
                     upsertInvoker,
-                    kycId || '',
+                    resolvedKycId,
                     interpretedStatus || ''
                 ),
                 3,
@@ -5164,7 +6906,8 @@ async function processBankCustomerRegistration(req, res, options = {}) {
                 message: 'Customer registration submitted for approval',
                 networkAddress,
                 tokenID: resolvedTokenID,
-                kycId: kycId || null,
+                customerId: resolvedCustomerId,
+                kycId: resolvedKycId || null,
                 kycStatus: interpretedStatus || ''
             });
         } catch (fabricError) {
@@ -5556,42 +7299,44 @@ app.post('/api/customer-to-token-transfer', authenticateJWT, async (req, res) =>
     try {
         const caller = req.user.username;
         const {
-            senderTokenID,
-            receiverTokenID,
-            receiverCustomerNetworkAddress,
+            customer_id,
+            bic_code,
             amount
         } = req.body;
+        const receiverCustomerRefValue = (customer_id || '').toString().trim();
+        const receiverBICValue = (bic_code || '').toString().trim().toUpperCase();
 
         console.log('Transfer request received:', {
-            senderTokenID,
-            receiverTokenID,
-            receiverCustomerNetworkAddress,
+            receiverCustomerRefValue,
+            receiverBICValue,
             amount,
             caller
         });
 
-        if (!senderTokenID || !receiverTokenID || !receiverCustomerNetworkAddress || !amount) {
+        const hasBicRoute = Boolean(receiverCustomerRefValue && receiverBICValue);
+        if (!hasBicRoute || !amount) {
             console.error('Missing required fields:', {
-                senderTokenID: !!senderTokenID,
-                receiverTokenID: !!receiverTokenID,
-                receiverCustomerNetworkAddress: !!receiverCustomerNetworkAddress,
+                customer_id: !!receiverCustomerRefValue,
+                bic_code: !!receiverBICValue,
                 amount: !!amount
             });
             return res.status(400).json({
                 success: false,
                 error: 'Missing required fields',
-                required: ['senderTokenID', 'receiverTokenID', 'receiverCustomerNetworkAddress', 'amount'],
+                required: [
+                    'amount',
+                    'customer_id',
+                    'bic_code'
+                ],
                 provided: {
-                    senderTokenID: !!senderTokenID,
-                    receiverTokenID: !!receiverTokenID,
-                    receiverCustomerNetworkAddress: !!receiverCustomerNetworkAddress,
+                    customer_id: !!receiverCustomerRefValue,
+                    bic_code: !!receiverBICValue,
                     amount: !!amount
                 },
                 note: 'Commission is configured via "Set Commission Rate" endpoint. senderNetworkAddress is automatically set to the authenticated caller',
                 example: {
-                    senderTokenID: 'HDFC-USD-8f2a3b4c-v1',
-                    receiverTokenID: 'SBI-INR-5a8c9f2d-v1',
-                    receiverCustomerNetworkAddress: 'cust_2a4b8c9f-d3e2-4a5b-8c9f-2a4b8c9f',
+                    customer_id: 'CUST-100234',
+                    bic_code: 'SBININBBXXX',
                     amount: 100
                 }
             });
@@ -5637,23 +7382,6 @@ app.post('/api/customer-to-token-transfer', authenticateJWT, async (req, res) =>
             });
         }
 
-        // SECURITY FIX #3: Network address format validation for receiver
-        if (!receiverCustomerNetworkAddress || typeof receiverCustomerNetworkAddress !== 'string' || receiverCustomerNetworkAddress.trim().length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'receiverCustomerNetworkAddress must be a non-empty string'
-            });
-        }
-        const trimmedReceiverAddress = receiverCustomerNetworkAddress.trim();
-        // Allow base64 encoded addresses (with = padding) and alphanumeric with hyphens/underscores
-        if (!/^[a-zA-Z0-9_\-=]+$/.test(trimmedReceiverAddress)) {
-            return res.status(400).json({
-                success: false,
-                error: 'receiverCustomerNetworkAddress format invalid',
-                detail: 'Must be base64 encoded (alphanumeric with =, hyphens, and underscores) or a network address identifier'
-            });
-        }
-
         // CRITICAL: Use caller's own network address from authentication (NOT from request body)
         // The chaincode validates that caller identity matches senderNetworkAddress
         // This ensures the caller can only send from their own account
@@ -5666,7 +7394,8 @@ app.post('/api/customer-to-token-transfer', authenticateJWT, async (req, res) =>
         }
 
         // SECURITY FIX #5: Deduplication - prevent duplicate concurrent transfers (15 minute window)
-        const dedupeKey = `${senderNetworkAddress}_${senderTokenID}_${receiverTokenID}_${trimmedReceiverAddress}_${parsedTransferAmount}`;
+        const dedupeTarget = `${receiverCustomerRefValue}_${receiverBICValue}`;
+        const dedupeKey = `${senderNetworkAddress}_${dedupeTarget}_${parsedTransferAmount}`;
         if (recentTransfers.has(dedupeKey)) {
             return res.status(409).json({
                 success: false,
@@ -5677,73 +7406,28 @@ app.post('/api/customer-to-token-transfer', authenticateJWT, async (req, res) =>
         }
         recentTransfers.set(dedupeKey, Date.now());
 
-        // SECURITY FIX #6: Receiver token existence check (fail fast before chaincode)
+        // Route now enforces privacy-safe customer-ref + BIC transfer.
         const walletPath = path.join(process.cwd(), 'wallet');
-        let gateway = null;
-        try {
-            const connection = await connect(walletPath, caller);
-            gateway = connection.gateway;
-            const contract = connection.contract;
-            const receiverTokenCheck = await contract.evaluateTransaction('GetTokenByID', receiverTokenID);
-            if (gateway) gateway.disconnect();
-            if (!receiverTokenCheck || receiverTokenCheck.toString().trim() === '') {
-                return res.status(404).json({
-                    success: false,
-                    error: 'Receiver token not found',
-                    token_id: receiverTokenID,
-                    detail: 'The receiving token does not exist or is not accessible'
-                });
-            }
-        } catch (tokenCheckError) {
-            if (gateway) {
-                try { gateway.disconnect(); } catch (e) { }
-            }
-            console.error('Token verification error:', tokenCheckError.message);
-            return res.status(400).json({
-                success: false,
-                error: 'Failed to verify receiver token',
-                detail: tokenCheckError.message
-            });
-        }
 
-        // SECURITY FIX #7: Balance pre-check (fail fast before chaincode)
-        try {
-            const balanceResult = await viewCustomerWallet(senderNetworkAddress, senderTokenID, walletPath, caller);
-            const balance = balanceResult.balance || 0;
-            if (balance < parsedTransferAmount) {
-                return res.status(403).json({
-                    success: false,
-                    error: 'Insufficient balance',
-                    available_balance: balance,
-                    required_amount: parsedTransferAmount,
-                    shortfall: parsedTransferAmount - balance
-                });
-            }
-        } catch (balanceError) {
-            console.warn('Balance pre-check failed (will validate in chaincode):', balanceError.message);
-            // Continue - chaincode will validate
-        }
-
-        const transferID = await createCustomerToTokenTransferRequest(
+        const transferID = await requestCustomerTransfer(
             walletPath,
             caller,
-            senderNetworkAddress,
-            senderTokenID,
-            receiverTokenID,
-            receiverCustomerNetworkAddress,
+            receiverCustomerRefValue,
+            receiverBICValue,
             parsedTransferAmount
         );
 
         // Fetch the created transfer to get actual commission and exchange rate details
         let transferDetails = {
             transfer_id: transferID,
+            msg_id: transferID,
             amount: parseInt(parsedTransferAmount),
             commission_amount: 0,
             commission_percentage: 0,
             receiver_net_amount: parseInt(parsedTransferAmount),
             exchange_rate: 1.0,
             converted_amount: parseInt(parsedTransferAmount),
-            status: 'PendingSenderTokenApproval'
+            status: 'PENDING_SENDER'
         };
 
         try {
@@ -5751,15 +7435,17 @@ app.post('/api/customer-to-token-transfer', authenticateJWT, async (req, res) =>
             try {
                 const transferBytes = await contract.evaluateTransaction('GetCustomerToTokenTransferRequestByID', transferID);
                 const transfer = JSON.parse(transferBytes.toString());
+                const normalizedTransfer = normalizeCustomerToTokenTransferRecord(transfer);
                 transferDetails = {
                     transfer_id: transferID,
-                    amount: transfer.Amount || parseInt(parsedTransferAmount),
-                    commission_amount: transfer.CommissionAmount || transfer.commission_amount || 0,
-                    commission_percentage: transfer.CommissionPercentage || transfer.commission_percentage || 0,
-                    receiver_net_amount: (transfer.Amount || parseInt(parsedTransferAmount)) - (transfer.CommissionAmount || 0),
-                    exchange_rate: transfer.ExchangeRate || transfer.exchange_rate || 1.0,
-                    converted_amount: transfer.ConvertedAmount || transfer.converted_amount || (transfer.Amount || parseInt(parsedTransferAmount)),
-                    status: transfer.Status || 'PendingSenderTokenApproval'
+                    msg_id: normalizedTransfer.msg_id || transferID,
+                    amount: normalizedTransfer.amount || parseInt(parsedTransferAmount),
+                    commission_amount: normalizedTransfer.commission_amount || 0,
+                    commission_percentage: normalizedTransfer.commission_percentage || 0,
+                    receiver_net_amount: normalizedTransfer.net_receiver_amount || (normalizedTransfer.amount || parseInt(parsedTransferAmount)),
+                    exchange_rate: normalizedTransfer.exchange_rate || 1.0,
+                    converted_amount: normalizedTransfer.converted_amount || (normalizedTransfer.amount || parseInt(parsedTransferAmount)),
+                    status: normalizedTransfer.status || 'PENDING_SENDER'
                 };
             } catch (readErr) {
                 console.warn('Could not fetch transfer details after creation:', readErr.message);
@@ -5785,10 +7471,13 @@ app.post('/api/customer-to-token-transfer', authenticateJWT, async (req, res) =>
             success: true,
             message: 'Customer-to-token transfer initiated successfully',
             transfer_id: transferDetails.transfer_id,
+            msg_id: transferDetails.msg_id,
             sender_network_address: senderNetworkAddress,
-            sender_token_id: senderTokenID,
-            receiver_token_id: receiverTokenID,
-            receiver_customer_network_address: receiverCustomerNetworkAddress,
+            sender_token_id: transferDetails.sender_token_id || undefined,
+            receiver_token_id: transferDetails.receiver_token_id || undefined,
+            receiver_customer_network_address: transferDetails.receiver_customer_network_address || undefined,
+            receiver_customer_ref: receiverCustomerRefValue || undefined,
+            receiver_bic: receiverBICValue || undefined,
             amount: transferDetails.amount,
             commission_amount: transferDetails.commission_amount,
             commission_percentage: transferDetails.commission_percentage,
@@ -5838,13 +7527,14 @@ app.get('/api/bank/customer-to-token-transfers/pending-as-sender', authenticateJ
                 ownerNetworkAddress
             );
 
+            const normalizedPending = dedupeCustomerToTokenTransfers(pendingTransfers);
             res.json({
                 success: true,
                 perspective: 'sender',
                 token_id: tokenId,
                 owner_network_address: ownerNetworkAddress,
-                pending_count: Array.isArray(pendingTransfers) ? pendingTransfers.length : 0,
-                pending_transfers: Array.isArray(pendingTransfers) ? pendingTransfers : []
+                pending_count: normalizedPending.length,
+                pending_transfers: normalizedPending
             });
         } catch (error) {
             console.error('Bank C-to-T transfers (sender) error:', error);
@@ -5888,14 +7578,15 @@ app.get('/api/bank/customer-to-token-transfers/pending-as-receiver', authenticat
                 ownerNetworkAddress
             );
 
+            const normalizedPending = dedupeCustomerToTokenTransfers(pendingTransfers);
             res.json({
                 success: true,
                 perspective: 'receiver',
                 token_id: tokenId,
                 owner_network_address: ownerNetworkAddress,
-                pending_count: Array.isArray(pendingTransfers) ? pendingTransfers.length : 0,
-                pending_transfers: Array.isArray(pendingTransfers) ? pendingTransfers : [],
-                transfers: Array.isArray(pendingTransfers) ? pendingTransfers : []
+                pending_count: normalizedPending.length,
+                pending_transfers: normalizedPending,
+                transfers: normalizedPending
             });
         } catch (error) {
             console.error('Bank C-to-T transfers (receiver) error:', error);
@@ -5936,13 +7627,14 @@ app.get('/api/customer-to-token-transfers/pending-as-sender/:tokenId', authentic
             ownerNetworkAddress
         );
 
+        const normalizedPending = dedupeCustomerToTokenTransfers(pendingTransfers);
         res.json({
             success: true,
             perspective: 'sender',
             token_id: tokenId,
             owner_network_address: ownerNetworkAddress,
-            pending_count: Array.isArray(pendingTransfers) ? pendingTransfers.length : 0,
-            pending_transfers: Array.isArray(pendingTransfers) ? pendingTransfers : []
+            pending_count: normalizedPending.length,
+            pending_transfers: normalizedPending
         });
     } catch (error) {
         console.error('View pending transfers (SENDER) error:', error);
@@ -5976,13 +7668,14 @@ app.get('/api/customer-to-token-transfers/pending-as-receiver/:tokenId', authent
             ownerNetworkAddress
         );
 
+        const normalizedPending = dedupeCustomerToTokenTransfers(pendingTransfers);
         res.json({
             success: true,
             perspective: 'receiver',
             token_id: tokenId,
             owner_network_address: ownerNetworkAddress,
-            pending_count: Array.isArray(pendingTransfers) ? pendingTransfers.length : 0,
-            pending_transfers: Array.isArray(pendingTransfers) ? pendingTransfers : []
+            pending_count: normalizedPending.length,
+            pending_transfers: normalizedPending
         });
     } catch (error) {
         console.error('View pending transfers (RECEIVER) error:', error);
@@ -6027,15 +7720,15 @@ app.get('/api/customer-to-token-transfers/pending/:tokenId', authenticateJWT, as
         ]);
 
         // Combine both views
-        const allPendingTransfers = [...senderTransfers, ...receiverTransfers];
+        const allPendingTransfers = dedupeCustomerToTokenTransfers([...(Array.isArray(senderTransfers) ? senderTransfers : []), ...(Array.isArray(receiverTransfers) ? receiverTransfers : [])]);
 
         res.json({
             success: true,
             token_id: tokenId,
             owner_network_address: ownerNetworkAddress,
-            pending_count: Array.isArray(allPendingTransfers) ? allPendingTransfers.length : 0,
-            pending_transfers: Array.isArray(allPendingTransfers) ? allPendingTransfers : [],
-            transfers: Array.isArray(allPendingTransfers) ? allPendingTransfers : [],
+            pending_count: allPendingTransfers.length,
+            pending_transfers: allPendingTransfers,
+            transfers: allPendingTransfers,
             note: 'This endpoint shows all pending transfers (both sender and receiver perspectives). Use pending-as-sender or pending-as-receiver for specific views.'
         });
     } catch (error) {
@@ -6060,12 +7753,13 @@ app.get('/api/customer-to-token-transfers/history/:tokenId', authenticateJWT, as
             tokenId
         );
 
+        const normalizedHistory = dedupeCustomerToTokenTransfers(transferHistory);
         res.json({
             success: true,
             token_id: tokenId,
-            completed_count: Array.isArray(transferHistory) ? transferHistory.length : 0,
-            completed_transfers: Array.isArray(transferHistory) ? transferHistory : [],
-            history: Array.isArray(transferHistory) ? transferHistory : []
+            completed_count: normalizedHistory.length,
+            completed_transfers: normalizedHistory,
+            history: normalizedHistory
         });
     } catch (error) {
         console.error('View transfer history error:', error);
@@ -6104,15 +7798,106 @@ app.get('/api/bank/customer-to-token-transfers/history', authenticateJWT, async 
             bankUserId,
             tokenId
         );
+        const normalizedHistory = (Array.isArray(transferHistory) ? transferHistory : []).map(transfer => {
+            const normalizedTransfer = normalizeCustomerToTokenTransferRecord(transfer);
+            const rawStatus = transfer.Status || transfer.status || '';
+            const normalizedStatus = String(rawStatus).trim().toLowerCase();
+            const isCompleted = normalizedStatus === 'completed' || normalizedStatus === 'settled';
+            const senderApprovedAt = transfer.SenderTokenOwnerApprovedAt || transfer.sender_approved_at || transfer.senderApprovedAt || '';
+            const receiverApprovedAt = transfer.ReceiverTokenOwnerApprovedAt || transfer.receiver_approved_at || transfer.receiverApprovedAt || '';
+
+            const normalizeFlag = value => {
+                if (value === true || value === false) return value;
+                if (typeof value === 'string') {
+                    const v = value.trim().toLowerCase();
+                    if (v === 'true') return true;
+                    if (v === 'false') return false;
+                }
+                return false;
+            };
+
+            return {
+                ...normalizedTransfer,
+                approved_by_sender_owner: isCompleted || Boolean(senderApprovedAt) || normalizeFlag(transfer.ApprovedBySenderOwner ?? transfer.approved_by_sender_owner),
+                approved_by_receiver_owner: isCompleted || Boolean(receiverApprovedAt) || normalizeFlag(transfer.ApprovedByReceiverOwner ?? transfer.approved_by_receiver_owner)
+            };
+        });
 
         res.json({
             success: true,
             token_id: tokenId,
-            completed_count: Array.isArray(transferHistory) ? transferHistory.length : 0,
-            completed_transfers: Array.isArray(transferHistory) ? transferHistory : []
+            completed_count: normalizedHistory.length,
+            completed_transfers: normalizedHistory
         });
     } catch (error) {
         console.error('View transfer history error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 5.1a Rejection analytics by reason (admin/bank analytics)
+app.get('/api/bank/customer-to-token-transfers/rejected/by-reason/:reason', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const reason = String(req.params.reason || '').trim().toUpperCase();
+        const rejected = await getRejectedByReason(walletPath, caller, reason);
+        const normalized = (Array.isArray(rejected) ? rejected : []).map(normalizeCustomerToTokenTransferRecord);
+        res.json({
+            success: true,
+            reason,
+            count: normalized.length,
+            transfers: normalized
+        });
+    } catch (error) {
+        console.error('Rejected-by-reason query error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 5.1b Rejection analytics by receiver bank BIC
+app.get('/api/bank/customer-to-token-transfers/rejected/by-bank/:receiverBIC', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const receiverBIC = String(req.params.receiverBIC || '').trim().toUpperCase();
+        const rejected = await getRejectedByBank(walletPath, caller, receiverBIC);
+        const normalized = (Array.isArray(rejected) ? rejected : []).map(normalizeCustomerToTokenTransferRecord);
+        res.json({
+            success: true,
+            receiver_bic: receiverBIC,
+            count: normalized.length,
+            transfers: normalized
+        });
+    } catch (error) {
+        console.error('Rejected-by-bank query error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 5.1c Expired escrow auto-refunds report
+app.get('/api/bank/customer-to-token-transfers/rejected/expired-escrow', authenticateJWT, async (req, res) => {
+    try {
+        const caller = req.user.username;
+        const walletPath = path.join(process.cwd(), 'wallet');
+        const rejected = await getExpiredEscrowReturns(walletPath, caller);
+        const normalized = (Array.isArray(rejected) ? rejected : []).map(normalizeCustomerToTokenTransferRecord);
+        res.json({
+            success: true,
+            count: normalized.length,
+            transfers: normalized
+        });
+    } catch (error) {
+        console.error('Expired-escrow query error:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -6192,27 +7977,67 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
         }
 
         const walletPath = path.join(process.cwd(), 'wallet');
+        const transferDegradeKey = `customer_transfer_history::${customerId}`;
         let allTransactions = [];
 
         try {
             // Get transfer history if requested
             if (type === 'all' || type === 'transfer') {
-                const transferHistory = await getCustomerToTokenTransferHistoryByCustomer(
-                    walletPath,
-                    customerId,
-                    customerNetworkAddress
-                );
+                let transferHistory = [];
+                if (!isEndpointDegraded(transferDegradeKey)) {
+                    try {
+                        transferHistory = await getCustomerToTokenTransferHistoryByCustomer(
+                            walletPath,
+                            customerId,
+                            customerNetworkAddress
+                        );
+                    } catch (transferErr) {
+                        if (isSchemaMismatchError(transferErr)) {
+                            markEndpointDegraded(transferDegradeKey);
+                            console.warn(`[REST API] Transfer history schema mismatch for ${customerId}; serving mint-only fallback temporarily`);
+                            transferHistory = [];
+                        } else {
+                            throw transferErr;
+                        }
+                    }
+                } else {
+                    console.warn(`[REST API] Transfer history degraded mode active for ${customerId}; skipping transfer chaincode call`);
+                }
 
                 // Map transfers to transaction format
 	                const mappedTransfers = (Array.isArray(transferHistory) ? transferHistory : []).map(transfer => {
-	                    const isSender = transfer.SenderCustomerID === customerNetworkAddress || transfer.sender_customer_id === customerNetworkAddress;
-	                    const isReceiver = transfer.ReceiverCustomerID === customerNetworkAddress || transfer.receiver_customer_id === customerNetworkAddress;
+                    const normalizedTransfer = normalizeCustomerToTokenTransferRecord(transfer);
+                    const isSender =
+                        transfer.SenderCustomerID === customerNetworkAddress ||
+                        transfer.sender_customer_id === customerNetworkAddress ||
+                        normalizedTransfer.sender_customer_ref === customerId;
+                    const isReceiver =
+                        transfer.ReceiverCustomerID === customerNetworkAddress ||
+                        transfer.receiver_customer_id === customerNetworkAddress ||
+                        normalizedTransfer.receiver_customer_ref === customerId;
 	                    const grossAmount = transfer.Amount || transfer.amount || 0;
 	                    const commissionAmount = transfer.CommissionAmount || transfer.commission_amount || 0;
 	                    const netReceived = isReceiver ? (grossAmount - commissionAmount) : grossAmount;
 	                    const completedAt = transfer.CompletedAt || transfer.completed_at || '';
-	                    const senderApproved = transfer.ApprovedBySenderOwner ?? transfer.approved_by_sender_owner ?? false;
-	                    const receiverApproved = transfer.ApprovedByReceiverOwner ?? transfer.approved_by_receiver_owner ?? false;
+	                    const rawStatus = transfer.Status || transfer.status || '';
+                    const normalizedStatus = String(rawStatus).trim().toLowerCase();
+                    const isCompleted = normalizedStatus === 'completed' || normalizedStatus === 'settled';
+	                    const normalizeApprovalFlag = (value, fallback = false) => {
+	                        if (value === true || value === false) return value;
+	                        if (typeof value === 'string') {
+	                            const v = value.trim().toLowerCase();
+	                            if (v === 'true') return true;
+	                            if (v === 'false') return false;
+	                        }
+	                        return fallback;
+	                    };
+	                    // Completed transfers must reflect both approvals as true.
+	                    const senderApproved = isCompleted
+	                        ? true
+	                        : normalizeApprovalFlag(transfer.ApprovedBySenderOwner ?? transfer.approved_by_sender_owner, false);
+	                    const receiverApproved = isCompleted
+	                        ? true
+	                        : normalizeApprovalFlag(transfer.ApprovedByReceiverOwner ?? transfer.approved_by_receiver_owner, false);
 	                    const createdAt =
 	                        transfer.CreatedAt ||
 	                        transfer.created_at ||
@@ -6220,6 +8045,34 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
 	                        transfer.sender_approved_at ||
 	                        '';
 	                    const eventTime = completedAt || createdAt;
+	                    const senderCurrency =
+	                        transfer.SenderCurrency ||
+	                        transfer.sender_currency ||
+	                        transfer.senderCurrency ||
+	                        transfer.Currency ||
+	                        transfer.currency ||
+	                        '';
+	                    const receiverCurrency =
+	                        transfer.ReceiverCurrency ||
+	                        transfer.receiver_currency ||
+	                        transfer.receiverCurrency ||
+	                        '';
+	                    const commissionPctRaw =
+	                        transfer.CommissionPercentage ??
+	                        transfer.commission_percentage ??
+	                        transfer.commissionPercentage ??
+	                        0;
+	                    const commissionPct = Number(commissionPctRaw) || 0;
+	                    const exchangeRateValue =
+	                        transfer.ExchangeRate ??
+	                        transfer.exchange_rate ??
+	                        transfer.exchangeRate ??
+	                        1.0;
+	                    const convertedAmountValue =
+	                        transfer.ConvertedAmount ??
+	                        transfer.converted_amount ??
+	                        transfer.convertedAmount ??
+	                        (transfer.Amount || grossAmount) * Number(exchangeRateValue || 1.0);
 
 	                    return {
 	                        transaction_id: transfer.TransferRequestID || transfer.transfer_request_id || '',
@@ -6229,24 +8082,24 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
                             ? `Transfer sent to ${transfer.ReceiverCustomerName || 'Customer'}` 
                             : `Transfer received from ${transfer.SenderCustomerName || 'Customer'}`,
                         amount: grossAmount,
-                        currency: transfer.SenderCurrency || transfer.sender_currency || '',
+                        currency: senderCurrency,
                         commission_amount: commissionAmount,
-                        commission_description: `${(transfer.CommissionPercentage || 0).toFixed(2)}% commission (${commissionAmount} ${transfer.ReceiverCurrency || ''})`,
+                        commission_description: `${commissionPct.toFixed(2)}% commission (${commissionAmount} ${receiverCurrency})`,
                         net_amount: netReceived,
 	                        sender: transfer.SenderCustomerName || transfer.sender_customer_name || '',
 	                        receiver: transfer.ReceiverCustomerName || transfer.receiver_customer_name || '',
 	                        sender_customer_token_id: transfer.SenderCustomerTokenID || transfer.sender_customer_token_id || '',
 	                        receiver_customer_token_id: transfer.ReceiverCustomerTokenID || transfer.receiver_customer_token_id || '',
-	                        status: transfer.Status || transfer.status || 'Completed',
+	                        status: rawStatus || 'Unknown',
 	                        timestamp: eventTime,
 	                        sort_timestamp: eventTime ? new Date(eventTime).getTime() : 0,
 	                        approved_by_sender_owner: Boolean(senderApproved),
 	                        approved_by_receiver_owner: Boolean(receiverApproved),
 	                        // Receiver currency and amount information
-	                        receiver_currency: transfer.ReceiverCurrency || transfer.receiver_currency || '',
+	                        receiver_currency: receiverCurrency,
 	                        receiver_amount: transfer.ReceiverCustomerAmount || transfer.receiver_customer_amount || netReceived,
-	                        exchange_rate: transfer.ExchangeRate || transfer.exchange_rate || 1.0,
-	                        converted_amount: transfer.ConvertedAmount || transfer.converted_amount || (transfer.Amount || grossAmount) * (transfer.ExchangeRate || 1.0)
+	                        exchange_rate: exchangeRateValue,
+	                        converted_amount: convertedAmountValue
                     };
                 });
 
@@ -6263,31 +8116,34 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
                     );
 
                     const mappedMints = (Array.isArray(approvedMintRequests) ? approvedMintRequests : []).map(mintReq => {
-                        const approved = mintReq.Approved !== undefined ? mintReq.Approved : Boolean(mintReq.approved);
-                        const rawStatus = mintReq.Status || mintReq.status || '';
+                        const normalizedMintReq = normalizeMintRequestRecord(mintReq);
+                        const approved = normalizedMintReq.status === 'APPROVED' || normalizedMintReq.status === 'COMPLETED';
+                        const rawStatus = normalizedMintReq.status || '';
                         const normalizedStatus = String(rawStatus).trim().toUpperCase();
                         const resolvedStatus = normalizedStatus
                             ? (['APPROVED', 'SUCCESS', 'DONE'].includes(normalizedStatus) ? 'COMPLETED' : normalizedStatus)
                             : (approved ? 'COMPLETED' : 'PENDING');
 
                         return {
-                            transaction_id: mintReq.RequestID || mintReq.request_id || '',
+                            transaction_id: normalizedMintReq.request_id || normalizedMintReq.msg_id || '',
                             transaction_category: 'MINT', // Category label
-                            customer_id: mintReq.CustomerID || mintReq.customer_id || '',
+                            customer_ref: normalizedMintReq.customer_ref || '',
+                            customer_id: normalizedMintReq.customer_id || '',
                             transaction_type: 'CREDIT',
                             transaction_type_description: 'Funds added to account (Mint approved)',
-                            amount: mintReq.Amount || mintReq.amount || 0,
-                            currency: mintReq.Currency || mintReq.currency || '',
+                            amount: normalizedMintReq.amount || 0,
+                            currency: normalizedMintReq.currency || '',
                             commission_amount: 0,
                             commission_description: 'No commission',
-                            net_amount: mintReq.Amount || mintReq.amount || 0,
+                            net_amount: normalizedMintReq.amount || 0,
                             sender: 'Bank',
                             receiver: customerId,
                             status: resolvedStatus,
-                            timestamp: mintReq.ApprovedAt || mintReq.approved_at || '',
-                            sort_timestamp: (mintReq.ApprovedAt || mintReq.approved_at) 
-                                ? new Date(mintReq.ApprovedAt || mintReq.approved_at).getTime() 
-                                : 0
+                            timestamp: normalizedMintReq.approved_at || normalizedMintReq.created_at || '',
+                            sort_timestamp: (normalizedMintReq.approved_at || normalizedMintReq.created_at)
+                                ? new Date(normalizedMintReq.approved_at || normalizedMintReq.created_at).getTime()
+                                : 0,
+                            daily_limit_used: normalizedMintReq.daily_limit_used || 0
                         };
                     });
 
@@ -6300,25 +8156,43 @@ app.get('/api/customer/transfer-history', authenticateJWT, async (req, res) => {
 
             console.log(`[REST API] Total transactions: ${allTransactions.length} (transfers + mints)`);
 
-            // Validate and filter by timestamp
+            // Filter by optional date range only.
+            // Do not drop records for clock skew between peers/containers and API host.
             allTransactions = allTransactions.filter(tx => {
                 if (!tx.timestamp) return true; // Keep if no timestamp
                 const txDate = new Date(tx.timestamp);
-                if (isNaN(txDate.getTime())) return false; // Filter out invalid dates
-                
-                // Check reasonable timestamp (within 1 year past or 1 day future)
-                const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-                const futureDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
-                if (txDate < oneYearAgo || txDate > futureDate) {
-                    console.warn(`WARNING: Transaction ${tx.transaction_id} has suspicious timestamp: ${tx.timestamp}`);
-                    return false;
-                }
+                if (isNaN(txDate.getTime())) return true; // Keep if invalid format; UI can still display raw record
 
                 // Apply date range filter
                 if (fromDate && txDate < fromDate) return false;
                 if (toDate && txDate > toDate) return false;
                 return true;
             });
+
+            // Deduplicate history rows.
+            // Chaincode scan can surface the same transfer under multiple legacy/new keys.
+            const dedupedByKey = new Map();
+            const txScore = tx => {
+                let score = 0;
+                if (tx?.timestamp) score += 2;
+                if (tx?.status) score += 1;
+                if (tx?.approved_by_sender_owner !== undefined) score += 1;
+                if (tx?.approved_by_receiver_owner !== undefined) score += 1;
+                if (tx?.receiver_currency) score += 1;
+                return score;
+            };
+            for (const tx of allTransactions) {
+                const key = String(
+                    tx?.transaction_id ||
+                    `${tx?.transaction_category || ''}::${tx?.transaction_type || ''}::${tx?.amount || 0}::${tx?.timestamp || ''}::${tx?.sender || ''}::${tx?.receiver || ''}`
+                ).trim();
+                if (!key) continue;
+                const existing = dedupedByKey.get(key);
+                if (!existing || txScore(tx) >= txScore(existing)) {
+                    dedupedByKey.set(key, tx);
+                }
+            }
+            allTransactions = Array.from(dedupedByKey.values());
 
             // Sort by timestamp descending (newest first)
             allTransactions.sort((a, b) => b.sort_timestamp - a.sort_timestamp);
@@ -6425,27 +8299,32 @@ app.get('/api/customer/mint-history', authenticateJWT, async (req, res) => {
 
             // Map to response format with transaction type
             let mappedMintRequests = (Array.isArray(approvedMintRequests) ? approvedMintRequests : []).map(mintReq => {
-                const approved = mintReq.Approved !== undefined ? mintReq.Approved : Boolean(mintReq.approved);
-                const rawStatus = mintReq.Status || mintReq.status || '';
+                const normalizedMintReq = normalizeMintRequestRecord(mintReq);
+                const approved = normalizedMintReq.status === 'APPROVED' || normalizedMintReq.status === 'COMPLETED';
+                const rawStatus = normalizedMintReq.status || '';
                 const normalizedStatus = String(rawStatus).trim().toUpperCase();
                 const resolvedStatus = normalizedStatus
                     ? (['APPROVED', 'SUCCESS', 'DONE'].includes(normalizedStatus) ? 'COMPLETED' : normalizedStatus)
                     : (approved ? 'COMPLETED' : 'PENDING');
 
                 return {
-                    request_id: mintReq.RequestID || mintReq.request_id || '',
-                    customer_id: mintReq.CustomerID || mintReq.customer_id || '',
+                    request_id: normalizedMintReq.request_id || '',
+                    msg_id: normalizedMintReq.msg_id || '',
+                    customer_ref: normalizedMintReq.customer_ref || '',
+                    customer_id: normalizedMintReq.customer_id || '',
                     transaction_type: 'CREDIT',
                     transaction_type_description: 'Funds added to account (Mint approved)',
-                    token_id: mintReq.TokenID || mintReq.token_id || '',
-                    currency: mintReq.Currency || mintReq.currency || '',
-                    amount: mintReq.Amount || mintReq.amount || 0,
+                    token_id: normalizedMintReq.token_id || '',
+                    currency: normalizedMintReq.currency || '',
+                    amount: normalizedMintReq.amount || 0,
                     status: resolvedStatus,
                     approved: approved,
-                    approved_at: mintReq.ApprovedAt || mintReq.approved_at || '',
-                    name: mintReq.Name || mintReq.name || '',
-                    kyc_id: mintReq.KycId || mintReq.kyc_id || '',
-                    kyc_status: mintReq.KycStatus || mintReq.kyc_status || ''
+                    approved_at: normalizedMintReq.approved_at || normalizedMintReq.created_at || '',
+                    name: normalizedMintReq.name || '',
+                    kyc_ref: normalizedMintReq.kyc_ref || '',
+                    kyc_id: normalizedMintReq.kyc_id || '',
+                    kyc_status: normalizedMintReq.kyc_status || '',
+                    daily_limit_used: normalizedMintReq.daily_limit_used || 0
                 };
             });
 
@@ -6525,11 +8404,24 @@ app.post('/api/bank/customer-to-token-transfers/approve-sender', authenticateJWT
         const bankUserId = req.user.username;
         const ownerNetworkAddress = getNetworkAddressForUser(bankUserId);
         const { transferRequestID } = req.body;
+        const rejectionReason = (req.body?.rejection_reason || req.body?.rejectionReason || 'SENDER_KYC_INVALID')
+            .toString()
+            .trim()
+            .toUpperCase();
+        const status = (req.body?.status || 'approved').toString().trim().toLowerCase();
+        const approved = status === 'approved';
 
         if (!transferRequestID) {
             return res.status(400).json({
                 success: false,
                 error: 'transferRequestID is required'
+            });
+        }
+
+        if (status !== 'approved' && status !== 'rejected') {
+            return res.status(400).json({
+                success: false,
+                error: 'status must be either approved or rejected'
             });
         }
 
@@ -6542,22 +8434,40 @@ app.post('/api/bank/customer-to-token-transfers/approve-sender', authenticateJWT
 
         const walletPath = path.join(process.cwd(), 'wallet');
 
-        const result = await submitWithRetry(
-            () => approveSenderTokenTransfer(
-                walletPath,
-                bankUserId,
-                transferRequestID,
-                ownerNetworkAddress,
-                true  // approved = true
-            ),
-            3,
-            `ApproveSenderTokenTransfer for ${transferRequestID}`
-        );
+        if (approved) {
+            await submitWithRetry(
+                () => approveSenderTokenTransfer(
+                    walletPath,
+                    bankUserId,
+                    transferRequestID,
+                    ownerNetworkAddress,
+                    true
+                ),
+                3,
+                `ApproveSenderTokenTransfer for ${transferRequestID}`
+            );
+        } else {
+            await submitWithRetry(
+                () => rejectSenderPreEscrow(
+                    walletPath,
+                    bankUserId,
+                    transferRequestID,
+                    ownerNetworkAddress,
+                    rejectionReason
+                ),
+                3,
+                `RejectSenderPreEscrow for ${transferRequestID}`
+            );
+        }
 
         res.json({
             success: true,
-            message: 'Transfer approved by sender token owner',
-            transfer_request_id: transferRequestID
+            message: approved
+                ? 'Transfer approved by sender token owner'
+                : 'Transfer rejected by sender token owner',
+            status,
+            transfer_request_id: transferRequestID,
+            rejection_reason: approved ? undefined : rejectionReason
         });
     } catch (error) {
         console.error('Approve sender token transfer error:', error);
@@ -6574,11 +8484,24 @@ app.post('/api/bank/customer-to-token-transfers/approve-receiver', authenticateJ
         const bankUserId = req.user.username;
         const ownerNetworkAddress = getNetworkAddressForUser(bankUserId);
         const { transferRequestID } = req.body;
+        const rejectionReason = (req.body?.rejection_reason || req.body?.rejectionReason || 'BANK_POLICY_VIOLATION')
+            .toString()
+            .trim()
+            .toUpperCase();
+        const status = (req.body?.status || 'approved').toString().trim().toLowerCase();
+        const approved = status === 'approved';
 
         if (!transferRequestID) {
             return res.status(400).json({
                 success: false,
                 error: 'transferRequestID is required'
+            });
+        }
+
+        if (status !== 'approved' && status !== 'rejected') {
+            return res.status(400).json({
+                success: false,
+                error: 'status must be either approved or rejected'
             });
         }
 
@@ -6591,72 +8514,92 @@ app.post('/api/bank/customer-to-token-transfers/approve-receiver', authenticateJ
 
         const walletPath = path.join(process.cwd(), 'wallet');
 
-        // Before approval, fetch transfer details to get currencies and calculate exchange rate
-        try {
-            const { gateway, contract } = await connect(walletPath, bankUserId);
-            const transferData = await contract.evaluateTransaction(
-                'GetCustomerToTokenTransferRequestByID',
-                transferRequestID
-            );
-            await gateway.disconnect();
+        // Before receiver approval, fetch transfer details to get currencies and calculate exchange rate.
+        if (approved) {
+            try {
+                const { gateway, contract } = await connect(walletPath, bankUserId);
+                const transferData = await contract.evaluateTransaction(
+                    'GetCustomerToTokenTransferRequestByID',
+                    transferRequestID
+                );
+                await gateway.disconnect();
 
-            const transfer = JSON.parse(transferData.toString());
-            const senderCurrency = transfer.sender_currency || transfer.SenderCurrency;
-            const receiverCurrency = transfer.receiver_currency || transfer.ReceiverCurrency;
-            const amount = transfer.amount || transfer.Amount || transfer.EscrowedAmount;
+                const transfer = JSON.parse(transferData.toString());
+                const senderCurrency = transfer.sender_currency || transfer.SenderCurrency;
+                const receiverCurrency = transfer.receiver_currency || transfer.ReceiverCurrency;
+                const amount = transfer.amount || transfer.Amount || transfer.EscrowedAmount;
 
-            console.log(`Transfer currencies: ${senderCurrency} -> ${receiverCurrency}, Amount: ${amount}`);
+                console.log(`Transfer currencies: ${senderCurrency} -> ${receiverCurrency}, Amount: ${amount}`);
 
-            // If different currencies, fetch exchange rate and calculate converted amount
-            if (senderCurrency !== receiverCurrency) {
-                const exchangeRate = await getFXRate(senderCurrency, receiverCurrency);
-                
-                // Commission deducted from sender amount FIRST (in sender's currency)
-                // Use the transfer's configured commission percentage from chaincode, do not hardcode 2%.
-                const commissionPercentage =
-                    Number(transfer.commission_percentage ?? transfer.CommissionPercentage ?? 0);
-                const commissionInSender = amount * (commissionPercentage / 100);
-                const remainingAfterCommission = amount - commissionInSender; // Full precision
-                
-                // Convert remaining amount at exact exchange rate (full precision)
-                const convertedAmountExact = remainingAfterCommission * exchangeRate;
-                const convertedAmount = Number(convertedAmountExact.toFixed(2));
-                
-                console.log(`Exchange rate: ${senderCurrency}/${receiverCurrency} = ${exchangeRate}`);
-                console.log(`Commission (${commissionPercentage}% of ${amount}): ${commissionInSender.toFixed(2)} ${senderCurrency}`);
-                console.log(`Remaining after commission: ${remainingAfterCommission.toFixed(2)} ${senderCurrency}`);
-                console.log(`Exact conversion: ${remainingAfterCommission.toFixed(2)} × ${exchangeRate} = ${convertedAmount} ${receiverCurrency}`);
+                // If different currencies, fetch exchange rate and calculate converted amount
+                if (senderCurrency !== receiverCurrency) {
+                    const exchangeRate = await getFXRate(senderCurrency, receiverCurrency);
 
-                // Store exchange rate and converted amount in transfer for chaincode to use
-                // These will be passed to the chaincode during approval
-                req.body.exchangeRate = exchangeRate;
-                req.body.convertedAmount = convertedAmount;
+                    // Commission deducted from sender amount FIRST (in sender's currency)
+                    // Use the transfer's configured commission percentage from chaincode, do not hardcode 2%.
+                    const commissionPercentage =
+                        Number(transfer.commission_percentage ?? transfer.CommissionPercentage ?? 0);
+                    const commissionInSender = amount * (commissionPercentage / 100);
+                    const remainingAfterCommission = amount - commissionInSender; // Full precision
+
+                    // Convert remaining amount at exact exchange rate (full precision)
+                    const convertedAmountExact = remainingAfterCommission * exchangeRate;
+                    const convertedAmount = Number(convertedAmountExact.toFixed(2));
+
+                    console.log(`Exchange rate: ${senderCurrency}/${receiverCurrency} = ${exchangeRate}`);
+                    console.log(`Commission (${commissionPercentage}% of ${amount}): ${commissionInSender.toFixed(2)} ${senderCurrency}`);
+                    console.log(`Remaining after commission: ${remainingAfterCommission.toFixed(2)} ${senderCurrency}`);
+                    console.log(`Exact conversion: ${remainingAfterCommission.toFixed(2)} × ${exchangeRate} = ${convertedAmount} ${receiverCurrency}`);
+
+                    // Store exchange rate and converted amount in transfer for chaincode to use
+                    // These will be passed to the chaincode during approval
+                    req.body.exchangeRate = exchangeRate;
+                    req.body.convertedAmount = convertedAmount;
+                }
+            } catch (fetchError) {
+                console.warn('Could not pre-fetch transfer details for FX rate:', fetchError.message);
+                // Continue with approval without exchange rate - chaincode will use fallback
             }
-        } catch (fetchError) {
-            console.warn('Could not pre-fetch transfer details for FX rate:', fetchError.message);
-            // Continue with approval without exchange rate - chaincode will use fallback
         }
 
-        const result = await submitWithRetry(
-            () => approveReceiverTokenTransfer(
-                walletPath,
-                bankUserId,
-                transferRequestID,
-                ownerNetworkAddress,
-                true,  // approved = true
-                req.body.exchangeRate,  // exchange rate if calculated
-                req.body.convertedAmount  // converted amount if calculated
-            ),
-            3,
-            `ApproveReceiverTokenTransfer for ${transferRequestID}`
-        );
+        if (approved) {
+            await submitWithRetry(
+                () => approveReceiverTokenTransfer(
+                    walletPath,
+                    bankUserId,
+                    transferRequestID,
+                    ownerNetworkAddress,
+                    true,
+                    req.body.exchangeRate,
+                    req.body.convertedAmount
+                ),
+                3,
+                `ApproveReceiverTokenTransfer for ${transferRequestID}`
+            );
+        } else {
+            await submitWithRetry(
+                () => rejectReceiver(
+                    walletPath,
+                    bankUserId,
+                    transferRequestID,
+                    ownerNetworkAddress,
+                    rejectionReason
+                ),
+                3,
+                `RejectReceiver for ${transferRequestID}`
+            );
+        }
 
         res.json({
             success: true,
-            message: 'Transfer approved by receiver token owner and completed',
+            message: approved
+                ? 'Transfer approved by receiver token owner and completed'
+                : 'Transfer rejected by receiver token owner',
+            status,
             transfer_request_id: transferRequestID,
             exchange_rate: req.body.exchangeRate,
-            converted_amount: req.body.convertedAmount
+            converted_amount: req.body.convertedAmount,
+            rejection_reason: approved ? undefined : rejectionReason
         });
     } catch (error) {
         console.error('Approve receiver token transfer error:', error);

@@ -75,10 +75,10 @@ const ApprovalTable = ({ title, subtitle, fetchUrl, approveUrl, rejectUrl, colum
     }, [fetchUrl]);
 
     const handleAction = async (item, decision) => {
-        setProcessingId(item.key || item.request_id || item.RequestID);
+        setProcessingId(item.key || item.msg_id || item.MsgID || item.request_id || item.RequestID);
         try {
             const url = decision === 'approved' ? approveUrl : rejectUrl;
-            const finalUrl = url.replace(':requestId', item.request_id || item.RequestID || item.request_id);
+            const finalUrl = url.replace(':requestId', item.msg_id || item.MsgID || item.request_id || item.RequestID || item.request_id);
 
             const payload = mapRequestToFields ? mapRequestToFields(item, decision, latestRegistration) : {};
 
@@ -153,7 +153,7 @@ const ApprovalTable = ({ title, subtitle, fetchUrl, approveUrl, rejectUrl, colum
                                                 disabled={!!processingId}
                                                 className="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 text-xs font-medium disabled:opacity-50"
                                             >
-                                                {processingId === (item.request_id || item.RequestID) ? '...' : 'Approve'}
+                                                {processingId === (item.msg_id || item.MsgID || item.request_id || item.RequestID) ? '...' : 'Approve'}
                                             </button>
                                         </div>
                                     </td>

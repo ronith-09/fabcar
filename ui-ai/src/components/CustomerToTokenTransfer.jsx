@@ -7,6 +7,20 @@ import {
   getTransferHistory
 } from '../services/customerToTokenTransferService';
 
+const getTransferId = (transfer = {}) =>
+  transfer.transfer_request_id || transfer.TransferRequestID || transfer.msg_id || transfer.MsgID || '';
+
+const getTransferStatus = (transfer = {}) =>
+  String(transfer.status || transfer.Status || '').trim().toUpperCase();
+
+const askRejectionReason = (defaultReason) => {
+  const input = window.prompt('Enter rejection reason code', defaultReason || '');
+  if (input === null) {
+    return null;
+  }
+  return String(input).trim().toUpperCase() || defaultReason;
+};
+
 export default function CustomerToTokenTransfer({ userRole, userNetworkAddress, tokenId }) {
   const [activeTab, setActiveTab] = useState('initiate');
   const [loading, setLoading] = useState(false);
@@ -18,6 +32,8 @@ export default function CustomerToTokenTransfer({ userRole, userNetworkAddress, 
     senderTokenID: '',
     receiverTokenID: '',
     receiverCustomerNetworkAddress: '',
+    receiverCustomerRef: '',
+    receiverBIC: '',
     amount: ''
   });
 
@@ -65,22 +81,36 @@ export default function CustomerToTokenTransfer({ userRole, userNetworkAddress, 
     setMessage(null);
 
     try {
-      if (!formData.senderTokenID || !formData.receiverTokenID || !formData.receiverCustomerNetworkAddress || !formData.amount) {
-        throw new Error('All fields (sender token, receiver token, receiver customer network address, amount) are required');
+      const hasLegacyRoute = Boolean(
+        formData.senderTokenID && formData.receiverTokenID && formData.receiverCustomerNetworkAddress
+      );
+      const hasBicRoute = Boolean(formData.receiverCustomerRef && formData.receiverBIC);
+      if (!formData.amount || (!hasLegacyRoute && !hasBicRoute)) {
+        throw new Error('Provide amount and either legacy token route or (customer_id + bic_code)');
       }
 
-      const result = await initiateCustomerToTokenTransfer(
-        formData.senderTokenID,
-        formData.receiverTokenID,
-        formData.receiverCustomerNetworkAddress,
-        formData.amount
-      );
+      const payload = {
+        amount: formData.amount
+      };
+
+      if (hasLegacyRoute) {
+        payload.senderTokenID = formData.senderTokenID;
+        payload.receiverTokenID = formData.receiverTokenID;
+        payload.receiverCustomerNetworkAddress = formData.receiverCustomerNetworkAddress;
+      }
+      if (hasBicRoute) {
+        payload.customer_id = formData.receiverCustomerRef;
+        payload.bic_code = formData.receiverBIC;
+      }
+
+      const result = await initiateCustomerToTokenTransfer(payload);
 
       console.log('Transfer response received:', result);
 
       // Display detailed commission and exchange rate breakdown
-      const commissionDisplay = result.commission_percentage 
-        ? `${result.commission_percentage.toFixed(2)}% (${result.commission_amount} ${formData.receiverTokenID.split('-')[1] || 'units'})`
+      const receiverUnit = result.currency || 'units';
+      const commissionDisplay = result.commission_percentage
+        ? `${result.commission_percentage.toFixed(2)}% (${result.commission_amount} ${receiverUnit})`
         : 'No commission configured';
 
       const exchangeRateDisplay = result.exchange_rate && result.exchange_rate !== 1.0
@@ -112,6 +142,8 @@ export default function CustomerToTokenTransfer({ userRole, userNetworkAddress, 
         senderTokenID: '',
         receiverTokenID: '',
         receiverCustomerNetworkAddress: '',
+        receiverCustomerRef: '',
+        receiverBIC: '',
         amount: ''
       });
     } catch (err) {
@@ -128,12 +160,21 @@ export default function CustomerToTokenTransfer({ userRole, userNetworkAddress, 
     setError(null);
 
     try {
-      const result = await approveBySenderBank(transferId, approve);
+      let rejectionReason = '';
+      if (!approve) {
+        const reason = askRejectionReason('SENDER_KYC_INVALID');
+        if (!reason) {
+          setLoading(false);
+          return;
+        }
+        rejectionReason = reason;
+      }
+      const result = await approveBySenderBank(transferId, approve, rejectionReason);
 
       setMessage({
         type: 'success',
         title: approve ? 'Transfer Approved' : 'Transfer Rejected',
-        details: result.message
+        details: result.message + (!approve && result.rejection_reason ? ` (${result.rejection_reason})` : '')
       });
 
       await fetchPendingTransfers();
@@ -150,12 +191,21 @@ export default function CustomerToTokenTransfer({ userRole, userNetworkAddress, 
     setError(null);
 
     try {
-      const result = await approveByReceiverBank(transferId, approve);
+      let rejectionReason = '';
+      if (!approve) {
+        const reason = askRejectionReason('BANK_POLICY_VIOLATION');
+        if (!reason) {
+          setLoading(false);
+          return;
+        }
+        rejectionReason = reason;
+      }
+      const result = await approveByReceiverBank(transferId, approve, rejectionReason);
 
       setMessage({
         type: 'success',
         title: approve ? 'Transfer Completed' : 'Transfer Rejected',
-        details: result.message
+        details: result.message + (!approve && result.rejection_reason ? ` (${result.rejection_reason})` : '')
       });
 
       await fetchPendingTransfers();
@@ -256,6 +306,9 @@ function InitiateTransferForm({ formData, setFormData, loading, onSubmit }) {
   return (
     <form onSubmit={onSubmit} className="glass-panel p-6 space-y-4">
       <h2 className="text-2xl font-bold">Initiate Customer-to-Token Transfer</h2>
+      <p className="text-sm text-white/60">
+        Use either legacy token route fields or privacy-safe BIC route fields.
+      </p>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
@@ -289,6 +342,30 @@ function InitiateTransferForm({ formData, setFormData, loading, onSubmit }) {
             placeholder="e.g., cust_2a4b8c9f-d3e2-4a5b-8c9f-2a4b8c9f"
             value={formData.receiverCustomerNetworkAddress}
             onChange={(e) => setFormData({ ...formData, receiverCustomerNetworkAddress: e.target.value })}
+            className="w-full px-4 py-2 rounded-lg bg-white/10 border border-white/20 text-white placeholder-white/50 focus:outline-none focus:border-blue-400"
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold mb-2">Receiver Customer Ref (BIC Route)</label>
+          <input
+            type="text"
+            placeholder="e.g., CUST-ICIC-002"
+            value={formData.receiverCustomerRef}
+            onChange={(e) => setFormData({ ...formData, receiverCustomerRef: e.target.value })}
+            className="w-full px-4 py-2 rounded-lg bg-white/10 border border-white/20 text-white placeholder-white/50 focus:outline-none focus:border-blue-400"
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold mb-2">Receiver BIC (BIC Route)</label>
+          <input
+            type="text"
+            placeholder="e.g., ICIC11INXXX"
+            value={formData.receiverBIC}
+            onChange={(e) => setFormData({ ...formData, receiverBIC: e.target.value.toUpperCase() })}
             className="w-full px-4 py-2 rounded-lg bg-white/10 border border-white/20 text-white placeholder-white/50 focus:outline-none focus:border-blue-400"
             disabled={loading}
           />
@@ -347,30 +424,35 @@ function PendingTransfersList({
 
   return (
     <div className="space-y-4">
-      {transfers.map((transfer) => (
-        <div key={transfer.TransferRequestID} className="glass-panel p-4">
+      {transfers.map((transfer) => {
+        const transferId = getTransferId(transfer);
+        const transferStatus = getTransferStatus(transfer);
+        return (
+        <div key={transferId} className="glass-panel p-4">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
             <div>
               <p className="text-xs text-white/50">Transfer ID</p>
-              <p className="font-mono text-sm truncate">{transfer.TransferRequestID}</p>
+              <p className="font-mono text-sm truncate">{transferId}</p>
             </div>
             <div>
               <p className="text-xs text-white/50">Amount</p>
-              <p className="font-bold text-lg">{transfer.Amount}</p>
+              <p className="font-bold text-lg">{transfer.amount ?? transfer.Amount ?? 0}</p>
             </div>
             <div>
               <p className="text-xs text-white/50">Commission</p>
               <p className="text-yellow-400 font-semibold">
-                {transfer.CommissionAmount ? `${transfer.CommissionAmount} (${(transfer.CommissionPercentage || 0).toFixed(2)}%)` : 'None'}
+                {(transfer.commission_amount ?? transfer.CommissionAmount)
+                  ? `${transfer.commission_amount ?? transfer.CommissionAmount} (${(transfer.commission_percentage ?? transfer.CommissionPercentage ?? 0).toFixed(2)}%)`
+                  : 'None'}
               </p>
             </div>
             <div>
               <p className="text-xs text-white/50">Status</p>
-              <p className="font-semibold">{transfer.Status}</p>
+              <p className="font-semibold">{transferStatus}</p>
             </div>
           </div>
 
-          {selectedTransfer === transfer.TransferRequestID && (
+          {selectedTransfer === transferId && (
             <ApprovalSection
               transfer={transfer}
               onSenderApprove={onSenderApprove}
@@ -382,38 +464,40 @@ function PendingTransfersList({
           <button
             onClick={() =>
               setSelectedTransfer(
-                selectedTransfer === transfer.TransferRequestID
+                selectedTransfer === transferId
                   ? null
-                  : transfer.TransferRequestID
+                  : transferId
               )
             }
             className="mt-2 px-4 py-2 rounded bg-white/10 hover:bg-white/20 text-sm font-semibold transition"
           >
-            {selectedTransfer === transfer.TransferRequestID ? '▼ Hide Details' : '▶ Show Details'}
+            {selectedTransfer === transferId ? '▼ Hide Details' : '▶ Show Details'}
           </button>
         </div>
-      ))}
+      )})}
     </div>
   );
 }
 
 // Sub-component: Approval Section
 function ApprovalSection({ transfer, onSenderApprove, onReceiverApprove, loading }) {
+  const transferStatus = getTransferStatus(transfer);
+  const transferId = getTransferId(transfer);
   return (
     <div className="mt-4 pt-4 border-t border-white/10 space-y-3">
-      {transfer.Status === 'PendingSenderTokenApproval' && (
+      {(transferStatus === 'PENDING_SENDER' || transferStatus === 'PENDINGSENDERTOKENAPPROVAL') && (
         <div className="space-y-2">
           <p className="text-sm text-yellow-400">🔔 Awaiting Sender Token Approval</p>
           <div className="flex gap-2">
             <button
-              onClick={() => onSenderApprove(transfer.TransferRequestID, true)}
+              onClick={() => onSenderApprove(transferId, true)}
               disabled={loading}
               className="px-4 py-2 rounded bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white text-sm font-semibold transition"
             >
               ✅ Approve
             </button>
             <button
-              onClick={() => onSenderApprove(transfer.TransferRequestID, false)}
+              onClick={() => onSenderApprove(transferId, false)}
               disabled={loading}
               className="px-4 py-2 rounded bg-red-600 hover:bg-red-700 disabled:bg-red-600/50 text-white text-sm font-semibold transition"
             >
@@ -423,19 +507,19 @@ function ApprovalSection({ transfer, onSenderApprove, onReceiverApprove, loading
         </div>
       )}
 
-      {transfer.Status === 'PendingReceiverTokenApproval' && (
+      {(transferStatus === 'PENDING_RECEIVER' || transferStatus === 'PENDINGRECEIVERTOKENAPPROVAL') && (
         <div className="space-y-2">
           <p className="text-sm text-yellow-400">🔔 Awaiting Receiver Token Approval</p>
           <div className="flex gap-2">
             <button
-              onClick={() => onReceiverApprove(transfer.TransferRequestID, true)}
+              onClick={() => onReceiverApprove(transferId, true)}
               disabled={loading}
               className="px-4 py-2 rounded bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white text-sm font-semibold transition"
             >
               ✅ Approve
             </button>
             <button
-              onClick={() => onReceiverApprove(transfer.TransferRequestID, false)}
+              onClick={() => onReceiverApprove(transferId, false)}
               disabled={loading}
               className="px-4 py-2 rounded bg-red-600 hover:bg-red-700 disabled:bg-red-600/50 text-white text-sm font-semibold transition"
             >
@@ -464,38 +548,52 @@ function TransferHistoryList({ transfers, loading }) {
 
   return (
     <div className="space-y-3">
-      {transfers.map((transfer) => (
-        <div key={transfer.TransferRequestID} className="glass-panel p-4">
+      {transfers.map((transfer) => {
+        const transferId = getTransferId(transfer);
+        const amount = transfer.amount ?? transfer.Amount ?? 0;
+        const commissionAmount = transfer.commission_amount ?? transfer.CommissionAmount ?? 0;
+        const commissionPct = transfer.commission_percentage ?? transfer.CommissionPercentage ?? 0;
+        const completedAt = transfer.completed_at || transfer.CompletedAt || transfer.settled_at || transfer.SettledAt || '';
+        const rejectionReason = transfer.rejection_reason || transfer.RejectionReason || '';
+        const rejectedAt = transfer.rejected_at || transfer.RejectedAt || '';
+        const status = getTransferStatus(transfer);
+        return (
+        <div key={transferId} className="glass-panel p-4">
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
             <div>
               <p className="text-xs text-white/50">Transfer ID</p>
-              <p className="font-mono text-sm truncate">{transfer.TransferRequestID}</p>
+              <p className="font-mono text-sm truncate">{transferId}</p>
             </div>
             <div>
               <p className="text-xs text-white/50">Amount Sent</p>
-              <p className="font-bold text-lg">{transfer.Amount}</p>
+              <p className="font-bold text-lg">{amount}</p>
             </div>
             <div>
               <p className="text-xs text-white/50">Commission</p>
               <p className="text-yellow-400 font-semibold">
-                {transfer.CommissionAmount ? `${transfer.CommissionAmount}` : '0'} ({transfer.CommissionPercentage ? `${transfer.CommissionPercentage.toFixed(2)}%` : '0%'})
+                {commissionAmount ? `${commissionAmount}` : '0'} ({commissionPct ? `${commissionPct.toFixed(2)}%` : '0%'})
               </p>
             </div>
             <div>
               <p className="text-xs text-white/50">Receiver Got</p>
               <p className="text-green-400 font-semibold">
-                {(transfer.Amount || 0) - (transfer.CommissionAmount || 0)}
+                {amount - commissionAmount}
               </p>
             </div>
             <div>
               <p className="text-xs text-white/50">Completed At</p>
               <p className="text-sm">
-                {transfer.CompletedAt ? new Date(transfer.CompletedAt).toLocaleDateString() : 'N/A'}
+                {completedAt ? new Date(completedAt).toLocaleDateString() : (rejectedAt ? new Date(rejectedAt).toLocaleDateString() : 'N/A')}
               </p>
             </div>
           </div>
+          {status.includes('REJECTED') && (
+            <div className="mt-3 text-sm text-red-300">
+              Reason: {rejectionReason || 'SMART_CONTRACT_ERROR'}
+            </div>
+          )}
         </div>
-      ))}
+      )})}
     </div>
   );
 }

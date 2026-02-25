@@ -6,20 +6,29 @@ import client, { safePost, safeGet } from './apiClient';
  */
 
 export async function initiateCustomerToTokenTransfer(
-  senderTokenID,
+  payloadOrSenderTokenID,
   receiverTokenID,
   receiverCustomerNetworkAddress,
   amount
 ) {
   try {
+    const payload = typeof payloadOrSenderTokenID === 'object' && payloadOrSenderTokenID !== null
+      ? { ...payloadOrSenderTokenID }
+      : {
+          senderTokenID: payloadOrSenderTokenID,
+          receiverTokenID,
+          receiverCustomerNetworkAddress,
+          amount
+        };
+
+    const normalizedPayload = {
+      ...payload,
+      amount: parseInt(payload.amount, 10)
+    };
+
     const response = await safePost(
       '/customer-to-token-transfer',
-      {
-        senderTokenID,
-        receiverTokenID,
-        receiverCustomerNetworkAddress,
-        amount: parseInt(amount)
-      },
+      normalizedPayload,
       { throwError: true }
     );
     return response;
@@ -29,15 +38,14 @@ export async function initiateCustomerToTokenTransfer(
   }
 }
 
-export async function approveBySenderBank(transferId, approved) {
-  if (!approved) {
-    throw new Error('Rejecting transfers is not supported by the current API.');
-  }
+export async function approveBySenderBank(transferId, approved, rejectionReason = '') {
   try {
     const response = await safePost(
       `/bank/customer-to-token-transfers/approve-sender`,
       {
-        transferRequestID: transferId
+        transferRequestID: transferId,
+        status: approved ? 'approved' : 'rejected',
+        ...(approved ? {} : { rejection_reason: rejectionReason })
       },
       { throwError: true }
     );
@@ -48,15 +56,14 @@ export async function approveBySenderBank(transferId, approved) {
   }
 }
 
-export async function approveByReceiverBank(transferId, approved) {
-  if (!approved) {
-    throw new Error('Rejecting transfers is not supported by the current API.');
-  }
+export async function approveByReceiverBank(transferId, approved, rejectionReason = '') {
   try {
     const response = await safePost(
       `/bank/customer-to-token-transfers/approve-receiver`,
       {
-        transferRequestID: transferId
+        transferRequestID: transferId,
+        status: approved ? 'approved' : 'rejected',
+        ...(approved ? {} : { rejection_reason: rejectionReason })
       },
       { throwError: true }
     );
